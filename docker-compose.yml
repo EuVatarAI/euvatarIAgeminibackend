@@ -1,0 +1,21 @@
+services:
+  gemini-v2-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemini-v2-backend
+    env_file:
+      - .env
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
+
+  gemini-v2-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemini-v2-worker
+    command: python scripts/quiz_generation_worker.py
+    env_file:
+      - .env
+    restart: unless-stopped
