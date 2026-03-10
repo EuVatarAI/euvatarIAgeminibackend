@@ -75,6 +75,27 @@ def _write_generation_log(
     Best effort structured log sink for each generation job.
     If table is missing, worker continues without failing the generation.
     """
+    if level in {"warning", "error"}:
+        try:
+            print(
+                "[GENERATION_LOG] "
+                f"generation_id={generation_id} "
+                f"level={level} "
+                f"event={event} "
+                f"message={message} "
+                f"payload={json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)}",
+                flush=True,
+            )
+        except Exception:
+            print(
+                "[GENERATION_LOG] "
+                f"generation_id={generation_id} "
+                f"level={level} "
+                f"event={event} "
+                f"message={message}",
+                flush=True,
+            )
+
     url = f"{settings.supabase_url}/rest/v1/generation_logs"
     body = [
         {
@@ -386,6 +407,15 @@ def _is_retryable_gemini_error_message(message: str) -> bool:
         "read error",
     )
     return any(token in text for token in retryable_tokens)
+
+
+def _should_retry_gemini_error_message(
+    message: str,
+    *,
+    attempt: int,
+    max_attempts: int,
+) -> bool:
+    return attempt < max_attempts and _is_retryable_gemini_error_message(message)
 
 
 def _strip_accents(text: str) -> str:
@@ -821,25 +851,30 @@ def _process_job(settings: Settings, job: Job):
                 except Exception as exc:
                     last_err = exc
                     err_str = str(exc)
-                    retryable = (
-                        attempt < max_attempts
-                        and _is_retryable_gemini_error_message(err_str)
+                    is_retryable = _is_retryable_gemini_error_message(err_str)
+                    should_retry = _should_retry_gemini_error_message(
+                        err_str,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
                     )
                     _write_generation_log(
                         settings,
                         job.id,
-                        level="warning" if retryable else "error",
+                        level="warning" if is_retryable else "error",
                         event="gemini_attempt_failed",
                         message="Gemini generation attempt failed",
                         payload={
                             "attempt": attempt,
                             "max_attempts": max_attempts,
-                            "retryable": retryable,
+                            "retryable": is_retryable,
+                            "will_retry": should_retry,
                             "error": err_str[:1000],
                         },
                     )
-                    if not retryable:
+                    if not is_retryable:
                         raise
+                    if not should_retry:
+                        break
                     sleep_s = retry_base_delay * (2 ** (attempt - 1))
                     time.sleep(sleep_s)
 
