@@ -46,6 +46,7 @@ class Job:
 
 _ALLOWED_GENDERS = {"mulher", "homem"}
 _ALLOWED_HAIR_COLORS = {"loiro", "castanho", "preto", "ruivo", "grisalho"}
+_PROMPT_IMAGE_DATA_KEY = "_prompt_images"
 
 
 def _estimated_cost_usd(job: Job) -> float:
@@ -469,12 +470,68 @@ def _render_prompt_template(template: str, data: dict | None) -> str:
         val = _resolve_prompt_variable_value(key, normalized_payload)
         if val is None:
             return ""
+        if isinstance(val, dict) and str(val.get("kind") or "") == "prompt_image":
+            label = str(val.get("label") or key).strip() or key
+            return f"reference image of {label}"
         return _translate_prompt_value_to_english(val)
 
     rendered = _VAR_TOKEN_RE.sub(_replace, raw)
     # normalize whitespace while keeping line breaks readable
     rendered = "\n".join(line.strip() for line in rendered.splitlines() if line.strip())
     return rendered
+
+
+def _extract_prompt_image_assets(data: dict | None) -> dict[str, dict[str, str]]:
+    payload = data if isinstance(data, dict) else {}
+    raw_assets = (
+        payload.get(_PROMPT_IMAGE_DATA_KEY)
+        if isinstance(payload.get(_PROMPT_IMAGE_DATA_KEY), dict)
+        else {}
+    )
+    assets: dict[str, dict[str, str]] = {}
+    for raw_key, raw_asset in raw_assets.items():
+        if not isinstance(raw_asset, dict):
+            continue
+        key = _normalize_variable_key(str(raw_key or ""))
+        storage_path = str(raw_asset.get("storage_path") or "").strip()
+        label = str(raw_asset.get("label") or key).strip() or key
+        if not key or not storage_path:
+            continue
+        assets[key] = {
+            "storage_path": storage_path,
+            "label": label,
+        }
+    return assets
+
+
+def _build_prompt_template_payload(data: dict | None) -> dict[str, object]:
+    payload = dict(data) if isinstance(data, dict) else {}
+    for key, asset in _extract_prompt_image_assets(payload).items():
+        payload[key] = {
+            "kind": "prompt_image",
+            "label": str(asset.get("label") or key).strip() or key,
+        }
+    return payload
+
+
+def _select_prompt_image_assets(
+    template: str,
+    available_assets: dict[str, dict[str, str]],
+) -> list[tuple[str, dict[str, str]]]:
+    if not available_assets:
+        return []
+
+    normalized_template = _normalize_template_placeholders(str(template or ""))
+    referenced_keys: list[str] = []
+    for match in _VAR_TOKEN_RE.finditer(normalized_template):
+        key = _normalize_variable_key(str(match.group(1) or ""))
+        if key in available_assets and key not in referenced_keys:
+            referenced_keys.append(key)
+
+    selected_keys = referenced_keys or list(available_assets.keys())
+    return [
+        (key, available_assets[key]) for key in selected_keys if key in available_assets
+    ]
 
 
 def _build_svg_card(job: Job, cred_row: dict) -> bytes:
@@ -629,6 +686,9 @@ def _process_job(settings: Settings, job: Job):
             payload={
                 "has_photo_path": bool(cred.get("photo_path")),
                 "has_data_json": bool(cred.get("data_json")),
+                "prompt_image_fields": len(
+                    _extract_prompt_image_assets(cred_data_for_log)
+                ),
                 "gender": gender,
                 "hair_color": hair_color,
                 "winner_archetype_id": str(
@@ -641,6 +701,7 @@ def _process_job(settings: Settings, job: Job):
         cred_data = (
             cred.get("data_json") if isinstance(cred.get("data_json"), dict) else {}
         )
+        prompt_template_payload = _build_prompt_template_payload(cred_data)
         winner_archetype_id = str(
             (cred_data or {}).get("winner_archetype_id") or ""
         ).strip()
@@ -651,8 +712,13 @@ def _process_job(settings: Settings, job: Job):
         )
         if not archetype:
             archetype = _load_first_archetype(settings, job.experience_id)
+        raw_archetype_prompt = str((archetype or {}).get("image_prompt") or "")
         archetype_prompt = _render_prompt_template(
-            str((archetype or {}).get("image_prompt") or ""), cred_data
+            raw_archetype_prompt, prompt_template_payload
+        )
+        prompt_image_assets = _select_prompt_image_assets(
+            raw_archetype_prompt,
+            _extract_prompt_image_assets(cred_data),
         )
         prompt_source = "archetype" if archetype_prompt else "fixed_default"
 
@@ -663,13 +729,16 @@ def _process_job(settings: Settings, job: Job):
         if not effective_gemini_key:
             raise RuntimeError("missing_experience_gemini_key")
         use_photo_prompt = bool((archetype or {}).get("use_photo_prompt"))
+        has_prompt_image_assets = bool(prompt_image_assets)
         can_prompt_only = bool(
             effective_gemini_key
             and (not photo_path)
             and archetype_prompt
-            and (not use_photo_prompt)
+            and ((not use_photo_prompt) or has_prompt_image_assets)
         )
-        if effective_gemini_key and (photo_path or can_prompt_only):
+        if effective_gemini_key and (
+            photo_path or has_prompt_image_assets or can_prompt_only
+        ):
             gemini_settings = replace(settings, gemini_api_key=effective_gemini_key)
             gemini = GeminiImageClient(gemini_settings)
             max_attempts = _gemini_max_attempts()
@@ -677,13 +746,36 @@ def _process_job(settings: Settings, job: Job):
             ref_bytes = b""
             ref_b64 = ""
             ref_mime = "image/jpeg"
+            inline_images: list[dict[str, str]] = []
             prompt_applied = archetype_prompt or build_editorial_prompt(
                 gender, hair_color
             )
             if photo_path:
                 ref_bytes, ref_mime = _download_reference_image(settings, photo_path)
                 ref_b64 = base64.b64encode(ref_bytes).decode("ascii")
+                inline_images.append(
+                    {
+                        "data": ref_b64,
+                        "mime_type": ref_mime,
+                    }
+                )
+            for _, asset in prompt_image_assets:
+                asset_bytes, asset_mime = _download_reference_image(
+                    settings,
+                    str(asset.get("storage_path") or ""),
+                )
+                inline_images.append(
+                    {
+                        "data": base64.b64encode(asset_bytes).decode("ascii"),
+                        "mime_type": asset_mime,
+                    }
+                )
+            if photo_path and has_prompt_image_assets:
+                generation_mode = "reference_photo_plus_prompt_images"
+            elif photo_path:
                 generation_mode = "reference_photo"
+            elif has_prompt_image_assets:
+                generation_mode = "prompt_images_only"
             else:
                 generation_mode = "prompt_only"
 
@@ -695,12 +787,11 @@ def _process_job(settings: Settings, job: Job):
 
             for attempt in range(1, max_attempts + 1):
                 try:
-                    if photo_path:
+                    if inline_images:
                         t_gem = time.time()
-                        raw = gemini.generate_from_reference_b64(
+                        raw = gemini.generate_from_images_b64(
                             prompt=prompt_applied,
-                            image_b64=ref_b64,
-                            mime_type=ref_mime,
+                            images=inline_images,
                         )
                         latency_ms = int((time.time() - t_gem) * 1000)
                         generated_bytes = raw.get("image_bytes") or b""

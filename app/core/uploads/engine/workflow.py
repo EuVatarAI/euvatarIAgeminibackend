@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 
 import requests
@@ -11,14 +12,15 @@ from app.infrastructure.supabase_rest import get_json
 from app.infrastructure.supabase_rest import rest_headers
 from app.routes.uploads.dtos import ConfirmUploadRequest, CreateSignedUploadRequest
 
-
-_ALLOWED_UPLOAD_TYPES = {"user_photo", "video", "asset"}
+_PROMPT_IMAGE_DATA_KEY = "_prompt_images"
 _ALLOWED_GENERATION_KINDS = {"credential_card", "quiz_result", "photo_with"}
 _MAX_UPLOAD_SIZE_BYTES_BY_TYPE = {
     "user_photo": int(os.getenv("QUIZ_MAX_USER_PHOTO_MB", "20")) * 1024 * 1024,
+    "prompt_image": int(os.getenv("QUIZ_MAX_PROMPT_IMAGE_MB", "20")) * 1024 * 1024,
     "video": 100 * 1024 * 1024,
     "asset": 20 * 1024 * 1024,
 }
+_ALLOWED_UPLOAD_TYPES = {"user_photo", "prompt_image", "video", "asset"}
 
 logger = get_logger(__name__)
 
@@ -31,6 +33,7 @@ class UploadsWorkflow:
         experience_id = (request.experience_id or "").strip()
         upload_type = (request.type or "").strip().lower()
         file_size_bytes = int(request.file_size_bytes)
+        field_key = self._normalize_field_key(request.field_key)
 
         if not experience_id:
             raise AppError("missing_experience_id", status_code=400)
@@ -40,22 +43,33 @@ class UploadsWorkflow:
             raise AppError("invalid_file_size", status_code=400)
         if file_size_bytes > _MAX_UPLOAD_SIZE_BYTES_BY_TYPE[upload_type]:
             raise AppError("file_too_large", status_code=413)
+        if upload_type == "prompt_image" and not field_key:
+            raise AppError("missing_field_key", status_code=400)
 
         self._load_active_experience_by_id(experience_id)
 
-        ext_by_type = {"user_photo": "jpg", "video": "mp4", "asset": "bin"}
-        storage_path = (
-            f"quiz/{experience_id}/{upload_type}/{uuid.uuid4().hex}.{ext_by_type[upload_type]}"
+        ext_by_type = {
+            "user_photo": "jpg",
+            "prompt_image": "jpg",
+            "video": "mp4",
+            "asset": "bin",
+        }
+        folder = (
+            f"{upload_type}/{field_key}"
+            if upload_type == "prompt_image"
+            else upload_type
         )
+        storage_path = f"quiz/{experience_id}/{folder}/{uuid.uuid4().hex}.{ext_by_type[upload_type]}"
         bucket = self.settings.supabase_bucket
-        sign_url = (
-            f"{self.settings.supabase_url}/storage/v1/object/upload/sign/{bucket}/{storage_path}"
-        )
+        sign_url = f"{self.settings.supabase_url}/storage/v1/object/upload/sign/{bucket}/{storage_path}"
 
         try:
             response = requests.post(
                 sign_url,
-                headers={**rest_headers(self.settings), "Content-Type": "application/json"},
+                headers={
+                    **rest_headers(self.settings),
+                    "Content-Type": "application/json",
+                },
                 json={"expiresIn": 600},
                 timeout=20,
             )
@@ -120,6 +134,8 @@ class UploadsWorkflow:
         storage_path = (request.storage_path or "").strip()
         upload_type = (request.type or "user_photo").strip().lower()
         token = (request.phone or "").strip()
+        field_key = self._normalize_field_key(request.field_key)
+        field_label = self._clean_field_label(request.field_label)
 
         if not experience_id:
             raise AppError("missing_experience_id", status_code=400)
@@ -129,9 +145,12 @@ class UploadsWorkflow:
             raise AppError("missing_storage_path", status_code=400)
         if upload_type not in _ALLOWED_UPLOAD_TYPES:
             raise AppError("invalid_upload_type", status_code=400)
+        if upload_type == "prompt_image" and not field_key:
+            raise AppError("missing_field_key", status_code=400)
 
         self._load_active_experience_by_id(experience_id)
-        if not self._load_credential_for_experience(credential_id, experience_id):
+        credential = self._load_credential_for_experience(credential_id, experience_id)
+        if not credential:
             raise AppError("credential_not_found_for_experience", status_code=404)
         if not storage_path.startswith(f"quiz/{experience_id}/"):
             raise AppError("invalid_storage_path_scope", status_code=400)
@@ -151,7 +170,9 @@ class UploadsWorkflow:
             )
             if self._is_eager_generation_enabled():
                 experience = self._load_experience_by_id(experience_id)
-                kind = self._kind_from_experience_type(str(experience.get("type") or ""))
+                kind = self._kind_from_experience_type(
+                    str(experience.get("type") or "")
+                )
                 generation_id, reused = self._create_or_reuse_generation(
                     experience_id=experience_id,
                     credential_id=credential_id,
@@ -164,6 +185,14 @@ class UploadsWorkflow:
                     credential_id,
                     reused,
                 )
+        elif upload_type == "prompt_image":
+            self._update_credential_prompt_images(
+                credential_id=credential_id,
+                credential=credential,
+                field_key=field_key,
+                field_label=field_label or field_key,
+                storage_path=storage_path,
+            )
 
         logger.info(
             "[uploads] upload_confirmed experience_id=%s credential_id=%s upload_type=%s storage_path=%s generation_id=%s",
@@ -218,7 +247,7 @@ class UploadsWorkflow:
             rows = get_json(
                 self.settings,
                 "credentials",
-                "id,experience_id",
+                "id,experience_id,data_json",
                 {
                     "id": f"eq.{credential_id}",
                     "experience_id": f"eq.{experience_id}",
@@ -243,6 +272,12 @@ class UploadsWorkflow:
             raise AppError("credential_query_failed", status_code=502) from exc
         return rows[0] if rows else None
 
+    def _normalize_field_key(self, value: str | None) -> str:
+        return re.sub(r"[^a-z0-9_]", "_", str(value or "").strip().lower()).strip("_")
+
+    def _clean_field_label(self, value: str | None) -> str:
+        return str(value or "").strip()[:120]
+
     def _insert_upload_row(
         self,
         experience_id: str,
@@ -254,7 +289,10 @@ class UploadsWorkflow:
         try:
             response = requests.post(
                 url,
-                headers={**rest_headers(self.settings), "Content-Type": "application/json"},
+                headers={
+                    **rest_headers(self.settings),
+                    "Content-Type": "application/json",
+                },
                 json=[
                     {
                         "experience_id": experience_id,
@@ -283,12 +321,17 @@ class UploadsWorkflow:
             )
             raise AppError("upload_audit_insert_failed", status_code=502)
 
-    def _update_credential_photo_path(self, credential_id: str, storage_path: str) -> None:
+    def _update_credential_photo_path(
+        self, credential_id: str, storage_path: str
+    ) -> None:
         url = f"{self.settings.supabase_url}/rest/v1/credentials?id=eq.{credential_id}"
         try:
             response = requests.patch(
                 url,
-                headers={**rest_headers(self.settings), "Content-Type": "application/json"},
+                headers={
+                    **rest_headers(self.settings),
+                    "Content-Type": "application/json",
+                },
                 json={"photo_path": storage_path},
                 timeout=20,
             )
@@ -308,8 +351,68 @@ class UploadsWorkflow:
             )
             raise AppError("credential_photo_update_failed", status_code=502)
 
+    def _update_credential_prompt_images(
+        self,
+        credential_id: str,
+        credential: dict,
+        field_key: str,
+        field_label: str,
+        storage_path: str,
+    ) -> None:
+        current_data = (
+            credential.get("data_json")
+            if isinstance(credential.get("data_json"), dict)
+            else {}
+        )
+        prompt_images = (
+            current_data.get(_PROMPT_IMAGE_DATA_KEY)
+            if isinstance(current_data.get(_PROMPT_IMAGE_DATA_KEY), dict)
+            else {}
+        )
+        next_prompt_images = {
+            **prompt_images,
+            field_key: {
+                "storage_path": storage_path,
+                "label": field_label,
+            },
+        }
+        next_data = {
+            **current_data,
+            _PROMPT_IMAGE_DATA_KEY: next_prompt_images,
+        }
+        url = f"{self.settings.supabase_url}/rest/v1/credentials?id=eq.{credential_id}"
+        try:
+            response = requests.patch(
+                url,
+                headers={
+                    **rest_headers(self.settings),
+                    "Content-Type": "application/json",
+                },
+                json={"data_json": next_data},
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[uploads] supabase_unreachable operation=update_credential_prompt_image credential_id=%s field_key=%s error=%s",
+                credential_id,
+                field_key,
+                str(exc),
+            )
+            raise AppError("supabase_unreachable", status_code=502) from exc
+        if not response.ok:
+            logger.error(
+                "[uploads] credential_prompt_image_update_failed credential_id=%s field_key=%s status=%s body=%s",
+                credential_id,
+                field_key,
+                response.status_code,
+                response.text[:200],
+            )
+            raise AppError("credential_prompt_image_update_failed", status_code=502)
+
     def _is_eager_generation_enabled(self) -> bool:
-        return os.getenv("QUIZ_EAGER_GENERATION_ON_UPLOAD", "false").strip().lower() in {
+        return os.getenv(
+            "QUIZ_EAGER_GENERATION_ON_UPLOAD", "false"
+        ).strip().lower() in {
             "1",
             "true",
             "yes",

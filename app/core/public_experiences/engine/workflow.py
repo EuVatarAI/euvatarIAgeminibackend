@@ -13,9 +13,15 @@ from app.infrastructure.supabase_rest import rest_headers
 from app.routes.public_experiences.dtos import CompleteLeadRequest
 from app.routes.public_experiences.dtos import CreateLeadRequest
 
-
 _ALLOWED_MODES = {"mobile", "totem", "auto"}
-_ALLOWED_VARIABLE_FIELD_TYPES = {"text", "email", "phone", "number", "select"}
+_ALLOWED_VARIABLE_FIELD_TYPES = {
+    "text",
+    "email",
+    "phone",
+    "number",
+    "select",
+    "prompt_image",
+}
 _MAX_LEAD_VALUE_LENGTH = 300
 _MAX_LEAD_FIELD_COUNT = 30
 
@@ -258,7 +264,9 @@ class PublicExperiencesWorkflow:
     def _normalize_variable_key(self, value: str) -> str:
         return re.sub(r"[^a-z0-9_]", "_", (value or "").strip().lower())
 
-    def _clean_lead_data(self, raw: dict[str, str], variables: list[dict]) -> dict[str, str]:
+    def _clean_lead_data(
+        self, raw: dict[str, str], variables: list[dict]
+    ) -> dict[str, str]:
         if not isinstance(raw, dict):
             raise AppError("invalid_data_payload", status_code=400)
         if len(raw.keys()) > _MAX_LEAD_FIELD_COUNT:
@@ -285,6 +293,8 @@ class PublicExperiencesWorkflow:
             cleaned[key] = value
 
         for key, rule in variables_by_key.items():
+            if str(rule.get("field_type") or "").strip().lower() == "prompt_image":
+                continue
             if bool(rule.get("required")) and not (cleaned.get(key) or "").strip():
                 raise AppError(f"missing_required_field:{key}", status_code=400)
         return cleaned
@@ -293,7 +303,11 @@ class PublicExperiencesWorkflow:
         field_type = str(rule.get("field_type") or "text").strip().lower()
         if field_type not in _ALLOWED_VARIABLE_FIELD_TYPES or not value:
             return
-        if field_type == "email" and not re.match(r"^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", value):
+        if field_type == "prompt_image":
+            return
+        if field_type == "email" and not re.match(
+            r"^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", value
+        ):
             raise AppError(f"invalid_email:{key}", status_code=400)
         if field_type == "phone" and not re.match(r"^\\+?[0-9()\\-\\s]{8,20}$", value):
             raise AppError(f"invalid_phone:{key}", status_code=400)
@@ -301,7 +315,9 @@ class PublicExperiencesWorkflow:
             raise AppError(f"invalid_number:{key}", status_code=400)
         if field_type == "select":
             valid_options = [
-                str(opt).strip() for opt in (rule.get("options") or []) if str(opt).strip()
+                str(opt).strip()
+                for opt in (rule.get("options") or [])
+                if str(opt).strip()
             ]
             if valid_options and value not in valid_options:
                 raise AppError(f"invalid_option:{key}", status_code=400)
@@ -396,7 +412,9 @@ class PublicExperiencesWorkflow:
                 response.text[:200],
             )
         if not response.ok:
-            raise AppError(f"lead_insert_failed:{response.status_code}", status_code=502)
+            raise AppError(
+                f"lead_insert_failed:{response.status_code}", status_code=502
+            )
         rows = response.json() or []
         lead_id = str((rows[0] or {}).get("id") or "").strip() if rows else ""
         return True, (lead_id or None)

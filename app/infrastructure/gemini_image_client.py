@@ -54,29 +54,45 @@ class GeminiImageClient:
             "usage_metadata": data.get("usageMetadata") or data.get("usage_metadata"),
         }
 
+    def generate_from_images_b64(
+        self,
+        prompt: str,
+        images: list[dict[str, str]],
+    ) -> dict:
+        parts = [{"text": prompt}]
+        for image in images:
+            data = str(image.get("data") or "").strip()
+            if not data:
+                continue
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": str(image.get("mime_type") or "image/jpeg"),
+                        "data": data,
+                    }
+                }
+            )
+        payload = {
+            "contents": [{"parts": parts}],
+            "generation_config": {"response_modalities": ["IMAGE"]},
+        }
+        return self._request_generation(payload)
+
     def generate_from_reference_b64(
         self,
         prompt: str,
         image_b64: str,
         mime_type: str,
     ) -> dict:
-        payload = {
-            "contents": [
+        return self.generate_from_images_b64(
+            prompt=prompt,
+            images=[
                 {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": mime_type or "image/jpeg",
-                                "data": image_b64,
-                            }
-                        },
-                    ]
+                    "data": image_b64,
+                    "mime_type": mime_type or "image/jpeg",
                 }
             ],
-            "generation_config": {"response_modalities": ["IMAGE"]},
-        }
-        return self._request_generation(payload)
+        )
 
     def generate_from_prompt(self, prompt: str) -> dict:
         payload = {

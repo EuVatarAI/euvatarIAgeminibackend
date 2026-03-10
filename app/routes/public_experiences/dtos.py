@@ -6,7 +6,7 @@ from app.core.dtos import ApiResponse
 class LeadConfigData(BaseModel):
     enabled: bool = Field(default=False)
     require_before_unlock: bool = Field(default=False)
-    fields: list[dict[str, str]] = Field(default_factory=list)
+    fields: list[dict[str, object]] = Field(default_factory=list)
     button_label: str | None = Field(default=None)
 
 
