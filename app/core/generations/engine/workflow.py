@@ -1,3 +1,5 @@
+import datetime as dt
+
 import requests
 
 from app.core.config import Settings
@@ -6,9 +8,14 @@ from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.infrastructure.supabase_rest import get_json
 from app.infrastructure.supabase_rest import rest_headers
-from app.routes.generations.dtos import CreateGenerationRequest
+from app.routes.generations.dtos import (
+    ConfirmGenerationFinalCardRequest,
+    CreateGenerationFinalCardSignedUrlRequest,
+    CreateGenerationRequest,
+)
 
 _ALLOWED_GENERATION_KINDS = {"credential_card", "quiz_result", "photo_with"}
+_MAX_FINAL_CARD_UPLOAD_BYTES = 20 * 1024 * 1024
 
 logger = get_logger(__name__)
 
@@ -78,13 +85,22 @@ class GenerationsWorkflow:
             raise AppError("missing_generation_id", status_code=400)
 
         try:
-            rows = get_json(
-                self.settings,
-                "generations",
-                "id,status,output_path,output_url,error_message,duration_ms",
-                {"id": f"eq.{clean_generation_id}"},
-                limit=1,
-            )
+            try:
+                rows = get_json(
+                    self.settings,
+                    "generations",
+                    "id,status,output_path,output_url,final_card_path,final_card_url,error_message,duration_ms",
+                    {"id": f"eq.{clean_generation_id}"},
+                    limit=1,
+                )
+            except RuntimeError:
+                rows = get_json(
+                    self.settings,
+                    "generations",
+                    "id,status,output_path,output_url,error_message,duration_ms",
+                    {"id": f"eq.{clean_generation_id}"},
+                    limit=1,
+                )
         except requests.RequestException as exc:
             logger.error(
                 "[generations] supabase_unreachable operation=get_status generation_id=%s error=%s",
@@ -107,12 +123,23 @@ class GenerationsWorkflow:
         output_url = row.get("output_url")
         if row.get("status") == "done" and not output_url and row.get("output_path"):
             output_url = self._build_signed_download_url(str(row.get("output_path")))
+        final_card_url = row.get("final_card_url")
+        if (
+            row.get("status") == "done"
+            and not final_card_url
+            and row.get("final_card_path")
+        ):
+            final_card_url = self._build_signed_download_url(
+                str(row.get("final_card_path"))
+            )
 
         return {
             "ok": True,
+            "id": clean_generation_id,
             "status": row.get("status"),
             "duration_ms": row.get("duration_ms"),
             "output_url": output_url,
+            "final_card_url": final_card_url,
             "error_message": row.get("error_message"),
         }
 
@@ -176,6 +203,140 @@ class GenerationsWorkflow:
             "logs": logs,
         }
 
+    async def create_final_card_signed_url(
+        self,
+        generation_id: str,
+        request: CreateGenerationFinalCardSignedUrlRequest,
+    ) -> dict:
+        clean_generation_id = (generation_id or "").strip()
+        if not clean_generation_id:
+            raise AppError("missing_generation_id", status_code=400)
+
+        file_size_bytes = int(request.file_size_bytes)
+        if file_size_bytes <= 0:
+            raise AppError("invalid_file_size", status_code=400)
+        if file_size_bytes > _MAX_FINAL_CARD_UPLOAD_BYTES:
+            raise AppError("file_too_large", status_code=413)
+
+        generation = self._load_generation_by_id(clean_generation_id)
+        experience_id = str(generation.get("experience_id") or "").strip()
+        if not experience_id:
+            raise AppError("generation_missing_experience", status_code=500)
+
+        bucket = self.settings.supabase_bucket
+        storage_path = f"quiz/{experience_id}/final-cards/{clean_generation_id}.png"
+        sign_url = (
+            f"{self.settings.supabase_url}/storage/v1/object/upload/sign/"
+            f"{bucket}/{storage_path}"
+        )
+        try:
+            response = requests.post(
+                sign_url,
+                headers={
+                    **rest_headers(self.settings),
+                    "Content-Type": "application/json",
+                },
+                json={"expiresIn": 600},
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[generations] supabase_unreachable operation=create_final_card_signed_url generation_id=%s error=%s",
+                clean_generation_id,
+                str(exc),
+            )
+            raise AppError("supabase_unreachable", status_code=502) from exc
+        if not response.ok:
+            logger.error(
+                "[generations] final_card_signed_url_failed generation_id=%s status=%s body=%s",
+                clean_generation_id,
+                response.status_code,
+                response.text[:200],
+            )
+            raise AppError("final_card_signed_url_failed", status_code=502)
+
+        data = response.json() or {}
+        signed_url = (
+            data.get("signedURL")
+            or data.get("signedUrl")
+            or data.get("uploadURL")
+            or data.get("upload_url")
+        )
+        if not signed_url and data.get("url") and data.get("token"):
+            base_url = str(data.get("url"))
+            token = str(data.get("token"))
+            if "token=" in base_url:
+                signed_url = base_url
+            else:
+                sep = "&" if "?" in base_url else "?"
+                signed_url = f"{base_url}{sep}token={token}"
+
+        if not signed_url:
+            raise AppError("signed_url_missing_in_response", status_code=502)
+
+        upload_url = (
+            signed_url
+            if str(signed_url).startswith("http")
+            else f"{self.settings.supabase_url}/storage/v1{signed_url}"
+        )
+        logger.info(
+            "[generations] final_card_signed_url_created generation_id=%s storage_path=%s",
+            clean_generation_id,
+            storage_path,
+        )
+        return {
+            "ok": True,
+            "upload_url": upload_url,
+            "storage_path": storage_path,
+            "bucket": bucket,
+        }
+
+    async def confirm_final_card(
+        self,
+        generation_id: str,
+        request: ConfirmGenerationFinalCardRequest,
+    ) -> dict:
+        clean_generation_id = (generation_id or "").strip()
+        if not clean_generation_id:
+            raise AppError("missing_generation_id", status_code=400)
+
+        storage_path = (request.storage_path or "").strip()
+        bucket = (request.bucket or self.settings.supabase_bucket or "").strip()
+        public_url = (request.public_url or "").strip()
+        if not storage_path:
+            raise AppError("missing_storage_path", status_code=400)
+        if not bucket:
+            raise AppError("missing_bucket", status_code=400)
+
+        generation = self._load_generation_by_id(clean_generation_id)
+        experience_id = str(generation.get("experience_id") or "").strip()
+        if not experience_id:
+            raise AppError("generation_missing_experience", status_code=500)
+
+        expected_prefix = f"quiz/{experience_id}/final-cards/{clean_generation_id}"
+        if not storage_path.startswith(expected_prefix):
+            raise AppError("invalid_storage_path_scope", status_code=400)
+
+        resolved_public_url = public_url or None
+        self._update_generation_final_card(
+            generation_id=clean_generation_id,
+            storage_path=storage_path,
+            bucket=bucket,
+            public_url=resolved_public_url,
+        )
+        logger.info(
+            "[generations] final_card_confirmed generation_id=%s storage_path=%s bucket=%s",
+            clean_generation_id,
+            storage_path,
+            bucket,
+        )
+        return {
+            "ok": True,
+            "final_card_path": storage_path,
+            "final_card_url": resolved_public_url
+            or self._build_signed_download_url(storage_path),
+        }
+
     def _load_experience_by_id(self, experience_id: str) -> dict:
         try:
             rows = get_json(
@@ -202,6 +363,33 @@ class GenerationsWorkflow:
 
         if not rows:
             raise AppError("experience_not_found_or_inactive", status_code=404)
+        return rows[0]
+
+    def _load_generation_by_id(self, generation_id: str) -> dict:
+        try:
+            rows = get_json(
+                self.settings,
+                "generations",
+                "id,experience_id,credential_id,status,output_path,final_card_path",
+                {"id": f"eq.{generation_id}"},
+                limit=1,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[generations] supabase_unreachable operation=load_generation generation_id=%s error=%s",
+                generation_id,
+                str(exc),
+            )
+            raise AppError("supabase_unreachable", status_code=502) from exc
+        except RuntimeError as exc:
+            logger.error(
+                "[generations] generation_query_failed generation_id=%s error=%s",
+                generation_id,
+                str(exc),
+            )
+            raise AppError("generation_query_failed", status_code=502) from exc
+        if not rows:
+            raise AppError("generation_not_found", status_code=404)
         return rows[0]
 
     def _load_credential_for_experience(
@@ -426,6 +614,46 @@ class GenerationsWorkflow:
             )
             raise AppError("generation_token_update_failed", status_code=502)
 
+    def _update_generation_final_card(
+        self,
+        generation_id: str,
+        storage_path: str,
+        bucket: str,
+        public_url: str | None,
+    ) -> None:
+        url = f"{self.settings.supabase_url}/rest/v1/generations?id=eq.{generation_id}"
+        try:
+            response = requests.patch(
+                url,
+                headers={
+                    **rest_headers(self.settings),
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "final_card_path": storage_path,
+                    "final_card_bucket": bucket,
+                    "final_card_url": public_url or None,
+                    "final_card_uploaded_at": self._now_iso(),
+                },
+                timeout=20,
+            )
+        except requests.RequestException as exc:
+            logger.error(
+                "[generations] supabase_unreachable operation=update_final_card generation_id=%s error=%s",
+                generation_id,
+                str(exc),
+            )
+            raise AppError("supabase_unreachable", status_code=502) from exc
+        if response.ok:
+            return
+        logger.error(
+            "[generations] final_card_update_failed generation_id=%s status=%s body=%s",
+            generation_id,
+            response.status_code,
+            response.text[:200],
+        )
+        raise AppError("generation_final_card_update_failed", status_code=502)
+
     def _build_signed_download_url(
         self,
         storage_path: str,
@@ -465,3 +693,6 @@ class GenerationsWorkflow:
             if str(signed).startswith("http")
             else f"{self.settings.supabase_url}/storage/v1{signed}"
         )
+
+    def _now_iso(self) -> str:
+        return dt.datetime.utcnow().isoformat() + "Z"

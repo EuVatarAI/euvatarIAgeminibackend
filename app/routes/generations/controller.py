@@ -1,7 +1,11 @@
 from fastapi.responses import JSONResponse
 
 from app.core.exceptions import AppError
-from app.routes.generations.dtos import CreateGenerationRequest
+from app.routes.generations.dtos import (
+    ConfirmGenerationFinalCardRequest,
+    CreateGenerationFinalCardSignedUrlRequest,
+    CreateGenerationRequest,
+)
 from app.routes.generations.service import GenerationsService
 
 
@@ -61,4 +65,49 @@ class GenerationsController:
             return JSONResponse(
                 status_code=500,
                 content={"ok": False, "error": f"generation_logs_exception:{exc}"},
+            )
+
+    async def create_final_card_signed_url(
+        self,
+        generation_id: str,
+        request: CreateGenerationFinalCardSignedUrlRequest,
+    ) -> dict | JSONResponse:
+        try:
+            return await self.service.create_final_card_signed_url(
+                generation_id,
+                request,
+            )
+        except AppError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"ok": False, "error": exc.message},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": f"generation_final_card_signed_url_exception:{exc}",
+                },
+            )
+
+    async def confirm_final_card(
+        self,
+        generation_id: str,
+        request: ConfirmGenerationFinalCardRequest,
+    ) -> dict | JSONResponse:
+        try:
+            return await self.service.confirm_final_card(generation_id, request)
+        except AppError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"ok": False, "error": exc.message},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": f"generation_final_card_confirm_exception:{exc}",
+                },
             )
