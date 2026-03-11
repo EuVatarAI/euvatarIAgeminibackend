@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from app.core.dtos import ApiResponse
@@ -13,7 +15,7 @@ class LeadConfigData(BaseModel):
 class CreateLeadRequest(BaseModel):
     mode_used: str = Field(default="mobile")
     create_credential: bool = Field(default=False)
-    data: dict[str, str] = Field(default_factory=dict)
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class CreateLeadData(BaseModel):

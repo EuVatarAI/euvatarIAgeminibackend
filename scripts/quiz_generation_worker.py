@@ -75,26 +75,25 @@ def _write_generation_log(
     Best effort structured log sink for each generation job.
     If table is missing, worker continues without failing the generation.
     """
-    if level in {"warning", "error"}:
-        try:
-            print(
-                "[GENERATION_LOG] "
-                f"generation_id={generation_id} "
-                f"level={level} "
-                f"event={event} "
-                f"message={message} "
-                f"payload={json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)}",
-                flush=True,
-            )
-        except Exception:
-            print(
-                "[GENERATION_LOG] "
-                f"generation_id={generation_id} "
-                f"level={level} "
-                f"event={event} "
-                f"message={message}",
-                flush=True,
-            )
+    try:
+        print(
+            "[GENERATION_LOG] "
+            f"generation_id={generation_id} "
+            f"level={level} "
+            f"event={event} "
+            f"message={message} "
+            f"payload={json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)}",
+            flush=True,
+        )
+    except Exception:
+        print(
+            "[GENERATION_LOG] "
+            f"generation_id={generation_id} "
+            f"level={level} "
+            f"event={event} "
+            f"message={message}",
+            flush=True,
+        )
 
     url = f"{settings.supabase_url}/rest/v1/generation_logs"
     body = [
@@ -162,6 +161,22 @@ def _load_credential_data(settings: Settings, credential_id: str) -> dict:
     if not rows:
         raise RuntimeError("credential_not_found")
     return rows[0]
+
+
+def _load_experience_prompt_assets(
+    settings: Settings, experience_id: str
+) -> list[dict]:
+    try:
+        return get_json(
+            settings,
+            "experience_prompt_assets",
+            "variable_key,asset_key,label,storage_path,required,sort_order",
+            {"experience_id": f"eq.{experience_id}", "order": "sort_order.asc"},
+        )
+    except RuntimeError as exc:
+        if "supabase_experience_prompt_assets_404" in str(exc):
+            return []
+        raise
 
 
 def _ext_from_mime(mime: str) -> str:
@@ -534,6 +549,157 @@ def _extract_prompt_image_assets(data: dict | None) -> dict[str, dict[str, str]]
     return assets
 
 
+def _normalize_prompt_asset_selection(raw_value: object) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, list):
+        raw_items = raw_value
+    else:
+        raw_items = [part.strip() for part in str(raw_value).split(",")]
+    normalized: list[str] = []
+    for item in raw_items:
+        key = _normalize_variable_key(str(item or ""))
+        if key and key not in normalized:
+            normalized.append(key)
+    return normalized
+
+
+def _resolve_catalog_prompt_assets(
+    data: dict | None,
+    rows: list[dict] | None,
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    payload = data if isinstance(data, dict) else {}
+    asset_rows = rows if isinstance(rows, list) else []
+    fixed_assets: list[dict[str, str]] = []
+    selectable_assets: dict[str, dict[str, dict[str, str]]] = {}
+
+    for row in asset_rows:
+        storage_path = str(row.get("storage_path") or "").strip()
+        label = str(row.get("label") or "").strip()
+        asset_key = _normalize_variable_key(str(row.get("asset_key") or ""))
+        if not storage_path or not label or not asset_key:
+            continue
+        asset = {
+            "asset_key": asset_key,
+            "label": label,
+            "storage_path": storage_path,
+        }
+        if bool(row.get("required")):
+            fixed_assets.append(asset)
+            continue
+        variable_key = _normalize_variable_key(str(row.get("variable_key") or ""))
+        if not variable_key:
+            continue
+        selectable_assets.setdefault(variable_key, {})[asset_key] = asset
+
+    selected_assets: list[dict[str, str]] = []
+    prompt_payload: dict[str, object] = {}
+    for variable_key, available_assets in selectable_assets.items():
+        selected_keys = _normalize_prompt_asset_selection(payload.get(variable_key))
+        if not selected_keys:
+            continue
+        matched_assets = [
+            available_assets[key] for key in selected_keys if key in available_assets
+        ]
+        if not matched_assets:
+            continue
+        selected_assets.extend(matched_assets)
+        labels = [asset["label"] for asset in matched_assets]
+        prompt_payload[variable_key] = labels if len(labels) > 1 else labels[0]
+
+    deduped_assets: list[dict[str, str]] = []
+    seen_storage_paths: set[str] = set()
+    for asset in [*fixed_assets, *selected_assets]:
+        storage_path = str(asset.get("storage_path") or "").strip()
+        if not storage_path or storage_path in seen_storage_paths:
+            continue
+        seen_storage_paths.add(storage_path)
+        deduped_assets.append(asset)
+
+    return deduped_assets, prompt_payload
+
+
+def _build_catalog_asset_prompt_appendix(
+    assets: list[dict[str, str]] | None,
+    prompt_payload: dict[str, object] | None,
+) -> str:
+    resolved_assets = assets if isinstance(assets, list) else []
+    payload = prompt_payload if isinstance(prompt_payload, dict) else {}
+
+    selected_labels: list[str] = []
+    for value in payload.values():
+        if isinstance(value, list):
+            for item in value:
+                label = str(item or "").strip()
+                if label:
+                    selected_labels.append(label)
+            continue
+        label = str(value or "").strip()
+        if label:
+            selected_labels.append(label)
+
+    selected_labels = list(dict.fromkeys(selected_labels))
+    fixed_labels = list(
+        dict.fromkeys(
+            [
+                str(asset.get("label") or "").strip()
+                for asset in resolved_assets
+                if str(asset.get("label") or "").strip()
+                and str(asset.get("label") or "").strip() not in selected_labels
+            ]
+        )
+    )
+    if not fixed_labels and not selected_labels:
+        return ""
+
+    fixed_prompt_labels = [
+        _translate_prompt_value_to_english(label) for label in fixed_labels
+    ]
+    selected_prompt_labels = [
+        _translate_prompt_value_to_english(label) for label in selected_labels
+    ]
+
+    instructions: list[str] = []
+    if fixed_labels:
+        instructions.append(
+            "Mandatory fixed reference assets that must define the scene structure: "
+            + ", ".join(fixed_prompt_labels)
+            + "."
+        )
+    if selected_labels:
+        instructions.append(
+            "Mandatory selected visual elements that must be clearly visible in the final image: "
+            + ", ".join(selected_prompt_labels)
+            + "."
+        )
+        if len(selected_prompt_labels) == 1:
+            instructions.append(
+                "Do not omit, hide, or replace the selected visual element. Integrate it into the composition in an obvious and readable way."
+            )
+        elif len(selected_prompt_labels) <= 3:
+            instructions.append(
+                "Do not omit, hide, or replace any selected visual element. Integrate every selected element into the composition in an obvious and readable way, with each one individually recognizable."
+            )
+        elif len(selected_prompt_labels) <= 8:
+            instructions.append(
+                "There are multiple selected visual elements. Arrange them as a balanced collectible composition around the participant, using shelves, accessories, props, or layered product placement so every selected element remains individually visible."
+            )
+        else:
+            instructions.append(
+                "There are many selected visual elements. Use a structured collage or curated display system inside and around the packaging, such as miniature props, side compartments, icon cards, stickers, shelves, or printed inserts, so the final composition still represents all selected elements."
+            )
+        instructions.append(
+            "Use the provided reference images for the selected assets as the source of truth for visual identity, shape, and object appearance."
+        )
+    instructions.append(
+        "The participant must remain the main subject, but the fixed and selected assets must appear as explicit visual objects in the final composition."
+    )
+    instructions.append(
+        "If the number of selected assets is high, reduce their size and distribute them intelligently, but do not silently remove selected assets from the scene."
+    )
+    return "\n".join(instructions)
+
+
 def _build_prompt_template_payload(data: dict | None) -> dict[str, object]:
     payload = dict(data) if isinstance(data, dict) else {}
     for key, asset in _extract_prompt_image_assets(payload).items():
@@ -707,6 +873,35 @@ def _process_job(settings: Settings, job: Job):
         cred_data_for_log = (
             cred.get("data_json") if isinstance(cred.get("data_json"), dict) else {}
         )
+        catalog_prompt_assets = _load_experience_prompt_assets(
+            settings, job.experience_id
+        )
+        catalog_assets, catalog_prompt_payload = _resolve_catalog_prompt_assets(
+            cred_data_for_log,
+            catalog_prompt_assets,
+        )
+        selected_catalog_labels: list[str] = []
+        for value in catalog_prompt_payload.values():
+            if isinstance(value, list):
+                selected_catalog_labels.extend(
+                    str(item or "").strip() for item in value if str(item or "").strip()
+                )
+                continue
+            label = str(value or "").strip()
+            if label:
+                selected_catalog_labels.append(label)
+        selected_catalog_labels = list(dict.fromkeys(selected_catalog_labels))
+        fixed_catalog_labels = list(
+            dict.fromkeys(
+                [
+                    str(asset.get("label") or "").strip()
+                    for asset in catalog_assets
+                    if str(asset.get("label") or "").strip()
+                    and str(asset.get("label") or "").strip()
+                    not in selected_catalog_labels
+                ]
+            )
+        )
         _write_generation_log(
             settings,
             job.id,
@@ -719,6 +914,9 @@ def _process_job(settings: Settings, job: Job):
                 "prompt_image_fields": len(
                     _extract_prompt_image_assets(cred_data_for_log)
                 ),
+                "catalog_prompt_assets": len(catalog_assets),
+                "fixed_catalog_assets": fixed_catalog_labels,
+                "selected_catalog_assets": selected_catalog_labels,
                 "gender": gender,
                 "hair_color": hair_color,
                 "winner_archetype_id": str(
@@ -731,7 +929,12 @@ def _process_job(settings: Settings, job: Job):
         cred_data = (
             cred.get("data_json") if isinstance(cred.get("data_json"), dict) else {}
         )
-        prompt_template_payload = _build_prompt_template_payload(cred_data)
+        prompt_template_payload = _build_prompt_template_payload(
+            {
+                **cred_data,
+                **catalog_prompt_payload,
+            }
+        )
         winner_archetype_id = str(
             (cred_data or {}).get("winner_archetype_id") or ""
         ).strip()
@@ -746,6 +949,16 @@ def _process_job(settings: Settings, job: Job):
         archetype_prompt = _render_prompt_template(
             raw_archetype_prompt, prompt_template_payload
         )
+        catalog_asset_appendix = _build_catalog_asset_prompt_appendix(
+            catalog_assets,
+            catalog_prompt_payload,
+        )
+        if catalog_asset_appendix:
+            archetype_prompt = (
+                f"{archetype_prompt}\n\n{catalog_asset_appendix}".strip()
+                if archetype_prompt
+                else catalog_asset_appendix
+            )
         prompt_image_assets = _select_prompt_image_assets(
             raw_archetype_prompt,
             _extract_prompt_image_assets(cred_data),
@@ -760,14 +973,22 @@ def _process_job(settings: Settings, job: Job):
             raise RuntimeError("missing_experience_gemini_key")
         use_photo_prompt = bool((archetype or {}).get("use_photo_prompt"))
         has_prompt_image_assets = bool(prompt_image_assets)
+        has_catalog_prompt_assets = bool(catalog_assets)
         can_prompt_only = bool(
             effective_gemini_key
             and (not photo_path)
             and archetype_prompt
-            and ((not use_photo_prompt) or has_prompt_image_assets)
+            and (
+                (not use_photo_prompt)
+                or has_prompt_image_assets
+                or has_catalog_prompt_assets
+            )
         )
         if effective_gemini_key and (
-            photo_path or has_prompt_image_assets or can_prompt_only
+            photo_path
+            or has_prompt_image_assets
+            or has_catalog_prompt_assets
+            or can_prompt_only
         ):
             gemini_settings = replace(settings, gemini_api_key=effective_gemini_key)
             gemini = GeminiImageClient(gemini_settings)
@@ -800,12 +1021,23 @@ def _process_job(settings: Settings, job: Job):
                         "mime_type": asset_mime,
                     }
                 )
-            if photo_path and has_prompt_image_assets:
-                generation_mode = "reference_photo_plus_prompt_images"
+            for asset in catalog_assets:
+                asset_bytes, asset_mime = _download_reference_image(
+                    settings,
+                    str(asset.get("storage_path") or ""),
+                )
+                inline_images.append(
+                    {
+                        "data": base64.b64encode(asset_bytes).decode("ascii"),
+                        "mime_type": asset_mime,
+                    }
+                )
+            if photo_path and (has_prompt_image_assets or has_catalog_prompt_assets):
+                generation_mode = "reference_photo_plus_prompt_assets"
             elif photo_path:
                 generation_mode = "reference_photo"
-            elif has_prompt_image_assets:
-                generation_mode = "prompt_images_only"
+            elif has_prompt_image_assets or has_catalog_prompt_assets:
+                generation_mode = "prompt_assets_only"
             else:
                 generation_mode = "prompt_only"
 
@@ -814,6 +1046,27 @@ def _process_job(settings: Settings, job: Job):
             model_name = None
             latency_ms = None
             last_err = None
+            _write_generation_log(
+                settings,
+                job.id,
+                level="info",
+                event="generation_inputs_resolved",
+                message="Generation inputs resolved before Gemini call",
+                payload={
+                    "generation_mode": generation_mode,
+                    "has_photo_path": bool(photo_path),
+                    "prompt_image_asset_labels": [
+                        str(asset.get("label") or "").strip()
+                        for _, asset in prompt_image_assets
+                        if str(asset.get("label") or "").strip()
+                    ],
+                    "fixed_catalog_assets": fixed_catalog_labels,
+                    "selected_catalog_assets": selected_catalog_labels,
+                    "inline_image_count": len(inline_images),
+                    "prompt_source": prompt_source,
+                    "prompt_preview": (prompt_applied or "")[:600],
+                },
+            )
 
             for attempt in range(1, max_attempts + 1):
                 try:
