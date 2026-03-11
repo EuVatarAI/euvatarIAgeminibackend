@@ -1,3 +1,5 @@
+"""Lightweight runtime settings used by lower-level infrastructure adapters."""
+
 from dataclasses import dataclass
 
 from app.core.config import get_settings
@@ -5,6 +7,12 @@ from app.core.config import get_settings
 
 @dataclass(frozen=True)
 class Settings:
+    """Immutable subset of configuration required by workflows and infrastructure.
+
+    This dataclass decouples lower-level modules from the full Pydantic settings model
+    while preserving only the fields they need to perform HTTP and Gemini operations.
+    """
+
     supabase_url: str
     supabase_service_role: str
     supabase_bucket: str
@@ -13,6 +21,11 @@ class Settings:
 
     @staticmethod
     def load() -> "Settings":
+        """Build the lightweight settings object from the global configuration.
+
+        Returns:
+            Settings: Normalized runtime settings for infrastructure helpers.
+        """
         config = get_settings()
         return Settings(
             supabase_url=config.supabase_url,

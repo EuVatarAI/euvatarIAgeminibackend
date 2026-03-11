@@ -1,3 +1,5 @@
+"""Workflow responsible for public experience lead capture and metrics."""
+
 import re
 from typing import Any
 from datetime import datetime
@@ -33,10 +35,27 @@ logger = get_logger(__name__)
 
 
 class PublicExperiencesWorkflow:
+    """Load public experience metadata, validate lead inputs, and persist lead rows.
+
+    Attributes:
+        settings (Settings): Runtime settings used for Supabase REST operations.
+    """
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     async def get_lead_config(self, slug: str) -> dict:
+        """Return the lead-capture configuration for a public experience slug.
+
+        Args:
+            slug (str): Public experience slug to resolve.
+
+        Returns:
+            dict: Lead configuration payload consumed by the public player.
+
+        Raises:
+            AppError: Raised when the slug is invalid or Supabase operations fail.
+        """
         clean_slug = (slug or "").strip()
         if not clean_slug:
             raise AppError("missing_slug", status_code=400)
@@ -88,6 +107,18 @@ class PublicExperiencesWorkflow:
         }
 
     async def create_lead(self, slug: str, request: CreateLeadRequest) -> dict:
+        """Create a lead row and optional credential for a public experience.
+
+        Args:
+            slug (str): Public experience slug to resolve.
+            request (CreateLeadRequest): Lead payload collected by the player.
+
+        Returns:
+            dict: Success payload with lead and optional credential identifiers.
+
+        Raises:
+            AppError: Raised when validation fails or persistence operations fail.
+        """
         clean_slug = (slug or "").strip()
         if not clean_slug:
             raise AppError("missing_slug", status_code=400)
@@ -140,6 +171,19 @@ class PublicExperiencesWorkflow:
         lead_id: str,
         request: CompleteLeadRequest,
     ) -> dict:
+        """Mark a lead as completed once the archetype result is known.
+
+        Args:
+            slug (str): Public experience slug to resolve.
+            lead_id (str): Lead identifier to update.
+            request (CompleteLeadRequest): Completion payload with the result id.
+
+        Returns:
+            dict: Success payload confirming the lead completion.
+
+        Raises:
+            AppError: Raised when identifiers are missing or persistence fails.
+        """
         clean_slug = (slug or "").strip()
         clean_lead_id = (lead_id or "").strip()
         archetype_result_id = (request.archetype_result_id or "").strip()
@@ -171,6 +215,17 @@ class PublicExperiencesWorkflow:
         }
 
     async def get_metrics(self, slug: str) -> dict:
+        """Return aggregate lead and generation metrics for a public experience.
+
+        Args:
+            slug (str): Public experience slug to resolve.
+
+        Returns:
+            dict: Metrics payload containing started, completed, dropped, and done counts.
+
+        Raises:
+            AppError: Raised when the slug is invalid or metrics queries fail.
+        """
         clean_slug = (slug or "").strip()
         if not clean_slug:
             raise AppError("missing_slug", status_code=400)
@@ -206,6 +261,17 @@ class PublicExperiencesWorkflow:
         }
 
     def _load_active_experience_by_slug(self, slug: str) -> dict:
+        """Load a published or active experience row by slug.
+
+        Args:
+            slug (str): Public slug to resolve.
+
+        Returns:
+            dict: Matching experience row from Supabase.
+
+        Raises:
+            AppError: Raised when the experience is missing or Supabase fails.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -233,6 +299,17 @@ class PublicExperiencesWorkflow:
         return rows[0]
 
     def _load_experience_variables(self, experience_id: str) -> list[dict]:
+        """Load configured lead variables for an experience.
+
+        Args:
+            experience_id (str): Experience identifier whose variables should be fetched.
+
+        Returns:
+            list[dict]: Ordered variable rows used to build lead fields.
+
+        Raises:
+            AppError: Raised when Supabase operations fail.
+        """
         try:
             return get_json(
                 self.settings,
@@ -256,6 +333,17 @@ class PublicExperiencesWorkflow:
             raise AppError("variables_query_failed", status_code=502) from exc
 
     def _load_experience_prompt_assets(self, experience_id: str) -> list[dict]:
+        """Load prompt-asset catalog rows for an experience.
+
+        Args:
+            experience_id (str): Experience identifier whose prompt assets should be loaded.
+
+        Returns:
+            list[dict]: Ordered prompt-asset rows, or an empty list when the table is absent.
+
+        Raises:
+            AppError: Raised when Supabase operations fail for reasons other than a missing table.
+        """
         try:
             return get_json(
                 self.settings,
@@ -282,6 +370,17 @@ class PublicExperiencesWorkflow:
             raise AppError("supabase_unreachable", status_code=502) from exc
 
     def _require_experience_id(self, experience: dict) -> str:
+        """Return the experience id or raise when it is missing.
+
+        Args:
+            experience (dict): Experience row returned from Supabase.
+
+        Returns:
+            str: Non-empty experience identifier.
+
+        Raises:
+            AppError: Raised when the row lacks an id.
+        """
         experience_id = str(experience.get("id") or "").strip()
         if not experience_id:
             raise AppError("experience_missing_id", status_code=500)
@@ -290,6 +389,14 @@ class PublicExperiencesWorkflow:
     def _group_selectable_assets_by_variable(
         self, rows: list[dict]
     ) -> dict[str, list[dict[str, str | None]]]:
+        """Group non-required prompt assets by their owning variable key.
+
+        Args:
+            rows (list[dict]): Prompt-asset rows loaded from Supabase.
+
+        Returns:
+            dict[str, list[dict[str, str | None]]]: Selectable assets indexed by variable key.
+        """
         grouped: dict[str, list[dict[str, str | None]]] = {}
         for row in rows:
             if bool(row.get("required")):
@@ -315,6 +422,16 @@ class PublicExperiencesWorkflow:
         row: dict,
         selectable_assets_by_variable: dict[str, list[dict[str, str | None]]],
     ) -> dict:
+        """Map a variable row into the public lead-field payload shape.
+
+        Args:
+            row (dict): Variable row loaded from Supabase.
+            selectable_assets_by_variable (dict[str, list[dict[str, str | None]]]):
+                Selectable prompt assets grouped by variable key.
+
+        Returns:
+            dict: Lead-field payload consumed by the public player.
+        """
         field_type = str(row.get("field_type") or "text").strip().lower()
         if field_type not in _ALLOWED_VARIABLE_FIELD_TYPES:
             field_type = "text"
@@ -333,9 +450,25 @@ class PublicExperiencesWorkflow:
         return payload
 
     def _normalize_variable_key(self, value: str) -> str:
+        """Normalize a variable key to the backend's storage format.
+
+        Args:
+            value (str): Raw variable key.
+
+        Returns:
+            str: Lowercased key containing only letters, numbers, and underscores.
+        """
         return re.sub(r"[^a-z0-9_]", "_", (value or "").strip().lower())
 
     def _normalize_asset_key(self, value: str) -> str:
+        """Normalize an asset key using the same rules as variable keys.
+
+        Args:
+            value (str): Raw asset key.
+
+        Returns:
+            str: Normalized asset key.
+        """
         return self._normalize_variable_key(value)
 
     def _clean_lead_data(
@@ -344,6 +477,19 @@ class PublicExperiencesWorkflow:
         variables: list[dict],
         prompt_assets: list[dict],
     ) -> dict[str, Any]:
+        """Normalize, validate, and filter a raw public lead payload.
+
+        Args:
+            raw (dict[str, Any]): Raw data sent by the player.
+            variables (list[dict]): Configured variable rows for the experience.
+            prompt_assets (list[dict]): Prompt-asset catalog rows for the experience.
+
+        Returns:
+            dict[str, Any]: Cleaned payload ready for persistence.
+
+        Raises:
+            AppError: Raised when validation rules are violated.
+        """
         if not isinstance(raw, dict):
             raise AppError("invalid_data_payload", status_code=400)
         if len(raw.keys()) > _MAX_LEAD_FIELD_COUNT:
@@ -389,6 +535,14 @@ class PublicExperiencesWorkflow:
         return cleaned
 
     def _normalize_untyped_field_value(self, raw_value: Any) -> Any | None:
+        """Normalize a value when no explicit variable definition exists.
+
+        Args:
+            raw_value (Any): Incoming untyped field value.
+
+        Returns:
+            Any | None: Sanitized scalar or list value, or `None` when empty.
+        """
         if raw_value is None:
             return None
         if isinstance(raw_value, list):
@@ -402,12 +556,32 @@ class PublicExperiencesWorkflow:
         return value or None
 
     def _sanitize_string_value(self, raw_value: Any) -> str:
+        """Trim a scalar value and enforce the per-field size limit.
+
+        Args:
+            raw_value (Any): Incoming value to sanitize.
+
+        Returns:
+            str: Trimmed string representation of the value.
+
+        Raises:
+            AppError: Raised when the resulting string exceeds the maximum length.
+        """
         value = str(raw_value or "").strip()
         if len(value) > _MAX_LEAD_VALUE_LENGTH:
             raise AppError("value_too_large", status_code=400)
         return value
 
     def _is_missing_required_value(self, value: Any, field_type: str) -> bool:
+        """Determine whether a normalized field still violates the required rule.
+
+        Args:
+            value (Any): Normalized field value.
+            field_type (str): Variable field type associated with the value.
+
+        Returns:
+            bool: `True` when the required value is effectively missing.
+        """
         if field_type == "prompt_asset_multi_select":
             return not isinstance(value, list) or len(value) == 0
         return not str(value or "").strip()
@@ -419,6 +593,17 @@ class PublicExperiencesWorkflow:
         rule: dict,
         selectable_assets: list[dict[str, str | None]],
     ) -> Any | None:
+        """Normalize and validate a typed variable value.
+
+        Args:
+            key (str): Normalized variable key being processed.
+            raw_value (Any): Raw value received from the player.
+            rule (dict): Variable definition row.
+            selectable_assets (list[dict[str, str | None]]): Catalog assets available for the variable.
+
+        Returns:
+            Any | None: Normalized value ready for persistence, or `None` when omitted.
+        """
         field_type = str(rule.get("field_type") or "text").strip().lower()
         if field_type not in _ALLOWED_VARIABLE_FIELD_TYPES:
             return self._normalize_untyped_field_value(raw_value)
@@ -443,6 +628,19 @@ class PublicExperiencesWorkflow:
         raw_value: Any,
         selectable_assets: list[dict[str, str | None]],
     ) -> list[str]:
+        """Normalize a multi-select prompt-asset payload into distinct asset keys.
+
+        Args:
+            key (str): Variable key being processed.
+            raw_value (Any): Raw selection payload.
+            selectable_assets (list[dict[str, str | None]]): Catalog assets allowed for the variable.
+
+        Returns:
+            list[str]: Distinct normalized asset keys selected by the user.
+
+        Raises:
+            AppError: Raised when too many or invalid asset keys are supplied.
+        """
         if raw_value is None:
             return []
         if isinstance(raw_value, str):
@@ -473,6 +671,17 @@ class PublicExperiencesWorkflow:
         rule: dict,
         selectable_assets: list[dict[str, str | None]],
     ) -> None:
+        """Validate a normalized field value against the configured variable rule.
+
+        Args:
+            key (str): Variable key being validated.
+            value (Any): Normalized value to validate.
+            rule (dict): Variable definition row.
+            selectable_assets (list[dict[str, str | None]]): Catalog assets allowed for the variable.
+
+        Raises:
+            AppError: Raised when the value violates the rule for its field type.
+        """
         field_type = str(rule.get("field_type") or "text").strip().lower()
         if field_type not in _ALLOWED_VARIABLE_FIELD_TYPES or value in ("", None, []):
             return
@@ -506,6 +715,19 @@ class PublicExperiencesWorkflow:
         data: dict[str, Any],
         mode_used: str,
     ) -> str:
+        """Insert a credential row when lead capture should also create a credential.
+
+        Args:
+            experience_id (str): Experience identifier that owns the credential.
+            data (dict[str, Any]): Normalized lead payload to persist.
+            mode_used (str): Capture mode recorded for the credential.
+
+        Returns:
+            str: Identifier of the inserted credential row.
+
+        Raises:
+            AppError: Raised when the insert fails or returns an empty payload.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/credentials"
         try:
             response = requests.post(
@@ -551,6 +773,18 @@ class PublicExperiencesWorkflow:
         experience_id: str,
         data: dict[str, Any],
     ) -> tuple[bool, str | None]:
+        """Insert a lead row for a public experience.
+
+        Args:
+            experience_id (str): Experience identifier that owns the lead.
+            data (dict[str, Any]): Normalized lead payload to persist.
+
+        Returns:
+            tuple[bool, str | None]: Flag indicating success and the inserted lead id when available.
+
+        Raises:
+            AppError: Raised when the insert fails.
+        """
         name = self._sanitize_scalar_field(data.get("name") or data.get("nome"))
         email = self._sanitize_scalar_field(data.get("email"))
         phone = self._sanitize_scalar_field(data.get("phone") or data.get("telefone"))
@@ -598,6 +832,14 @@ class PublicExperiencesWorkflow:
         return True, (lead_id or None)
 
     def _sanitize_scalar_field(self, value: Any) -> str | None:
+        """Convert an optional scalar field into a trimmed string or `None`.
+
+        Args:
+            value (Any): Incoming scalar value from the cleaned lead payload.
+
+        Returns:
+            str | None: Trimmed scalar string, or `None` for empty and list values.
+        """
         if value is None or isinstance(value, list):
             return None
         clean_value = str(value).strip()
@@ -609,6 +851,16 @@ class PublicExperiencesWorkflow:
         lead_id: str,
         archetype_result_id: str,
     ) -> None:
+        """Persist completion metadata for a lead row.
+
+        Args:
+            experience_id (str): Experience identifier that owns the lead.
+            lead_id (str): Lead identifier to update.
+            archetype_result_id (str): Result identifier associated with the completed lead.
+
+        Raises:
+            AppError: Raised when the update fails or the lead is not found.
+        """
         url = (
             f"{self.settings.supabase_url}/rest/v1/leads"
             f"?id=eq.{lead_id}&experience_id=eq.{experience_id}"
@@ -653,6 +905,18 @@ class PublicExperiencesWorkflow:
             raise AppError("lead_not_found_for_experience", status_code=404)
 
     def _count_rows(self, table: str, filters: dict[str, str]) -> int:
+        """Count rows in a Supabase table using exact-count headers.
+
+        Args:
+            table (str): Table name to count rows from.
+            filters (dict[str, str]): Supabase filter parameters applied to the count query.
+
+        Returns:
+            int: Number of rows matching the requested filters.
+
+        Raises:
+            AppError: Raised when the count query fails.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/{table}"
         try:
             response = requests.get(

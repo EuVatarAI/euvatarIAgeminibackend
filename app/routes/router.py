@@ -1,3 +1,5 @@
+"""Top-level API router composition for the FastAPI application."""
+
 from fastapi import APIRouter
 
 from app.routes.credentials.route import router as credentials_router

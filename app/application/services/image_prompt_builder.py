@@ -1,3 +1,5 @@
+"""Prompt construction helpers for editorial portrait generation."""
+
 from __future__ import annotations
 
 ALLOWED_GENDERS = {"homem", "mulher"}
@@ -30,6 +32,18 @@ _PROMPT_TEMPLATE = (
 
 
 def build_editorial_prompt(gender: str, hair_color: str) -> str:
+    """Build the editorial portrait prompt from normalized participant traits.
+
+    Args:
+        gender (str): Participant gender label expected by the prompt templates.
+        hair_color (str): Participant hair color label expected by the templates.
+
+    Returns:
+        str: Fully rendered editorial portrait prompt ready for image generation.
+
+    Raises:
+        ValueError: Raised when gender or hair color are outside the supported catalog.
+    """
     normalized_gender = (gender or "").strip().lower()
     normalized_hair_color = (hair_color or "").strip().lower()
 

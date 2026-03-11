@@ -1,3 +1,5 @@
+"""Workflow responsible for creating credential rows for public experiences."""
+
 import requests
 
 from app.core.config import Settings
@@ -15,10 +17,27 @@ logger = get_logger(__name__)
 
 
 class CredentialsWorkflow:
+    """Persist participant credential data after validating experience and mode inputs.
+
+    Attributes:
+        settings (Settings): Runtime settings used for Supabase REST requests.
+    """
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     async def create_credential(self, request: CreateCredentialRequest) -> dict:
+        """Create a credential row for a published experience.
+
+        Args:
+            request (CreateCredentialRequest): Credential payload collected from the player.
+
+        Returns:
+            dict: Success payload containing the created credential identifier.
+
+        Raises:
+            AppError: Raised when validation fails or Supabase operations fail.
+        """
         experience_id = (request.experience_id or "").strip()
         mode_used = (request.mode_used or "").strip().lower()
         data = request.data or {}
@@ -47,6 +66,17 @@ class CredentialsWorkflow:
         return {"ok": True, "credential_id": credential_id}
 
     def _load_active_experience_by_id(self, experience_id: str) -> dict:
+        """Load an experience and ensure it is active or published.
+
+        Args:
+            experience_id (str): Experience identifier to load.
+
+        Returns:
+            dict: Supabase row for the matching experience.
+
+        Raises:
+            AppError: Raised when the experience is missing, inactive, or Supabase fails.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -80,6 +110,19 @@ class CredentialsWorkflow:
         data: dict,
         mode_used: str,
     ) -> str:
+        """Insert a credential row into Supabase.
+
+        Args:
+            experience_id (str): Experience identifier associated with the credential.
+            data (dict): Participant data to persist in `data_json`.
+            mode_used (str): Capture mode used for the credential.
+
+        Returns:
+            str: Identifier of the inserted credential row.
+
+        Raises:
+            AppError: Raised when the insert fails or returns an empty payload.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/credentials"
         try:
             response = requests.post(

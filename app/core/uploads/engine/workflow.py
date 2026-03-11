@@ -1,3 +1,5 @@
+"""Workflow responsible for signed upload URLs and upload confirmation side effects."""
+
 import os
 import re
 import uuid
@@ -26,10 +28,27 @@ logger = get_logger(__name__)
 
 
 class UploadsWorkflow:
+    """Create signed upload URLs and persist confirmed uploads for experience flows.
+
+    Attributes:
+        settings (Settings): Runtime settings used for Supabase and storage requests.
+    """
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     async def create_signed_url(self, request: CreateSignedUploadRequest) -> dict:
+        """Create a signed upload URL for a scoped experience asset.
+
+        Args:
+            request (CreateSignedUploadRequest): Upload request with experience, type, and size.
+
+        Returns:
+            dict: Signed upload payload containing the storage path and upload URL.
+
+        Raises:
+            AppError: Raised when validation fails or Supabase signing fails.
+        """
         experience_id = (request.experience_id or "").strip()
         upload_type = (request.type or "").strip().lower()
         file_size_bytes = int(request.file_size_bytes)
@@ -129,6 +148,20 @@ class UploadsWorkflow:
         }
 
     async def confirm_upload(self, request: ConfirmUploadRequest) -> dict:
+        """Confirm an uploaded asset and persist its side effects.
+
+        This method records the upload audit row, updates credential metadata, and may
+        start or reuse a generation when eager generation is enabled for user photos.
+
+        Args:
+            request (ConfirmUploadRequest): Upload confirmation payload.
+
+        Returns:
+            dict: Success payload with an optional eager generation id.
+
+        Raises:
+            AppError: Raised when validation fails or Supabase operations fail.
+        """
         experience_id = (request.experience_id or "").strip()
         credential_id = (request.credential_id or "").strip()
         storage_path = (request.storage_path or "").strip()
@@ -205,6 +238,17 @@ class UploadsWorkflow:
         return {"ok": True, "generation_id": generation_id}
 
     def _load_active_experience_by_id(self, experience_id: str) -> dict:
+        """Load an experience and ensure it is active or published.
+
+        Args:
+            experience_id (str): Experience identifier to load.
+
+        Returns:
+            dict: Supabase row for the matching experience.
+
+        Raises:
+            AppError: Raised when the experience is missing or inactive.
+        """
         experience = self._load_experience_by_id(experience_id)
         status = str(experience.get("status") or "").strip().lower()
         if status not in {"active", "published"}:
@@ -212,6 +256,17 @@ class UploadsWorkflow:
         return experience
 
     def _load_experience_by_id(self, experience_id: str) -> dict:
+        """Load an experience row without applying status restrictions.
+
+        Args:
+            experience_id (str): Experience identifier to query.
+
+        Returns:
+            dict: Supabase row for the matching experience.
+
+        Raises:
+            AppError: Raised when the lookup fails or no row exists.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -243,6 +298,18 @@ class UploadsWorkflow:
         credential_id: str,
         experience_id: str,
     ) -> dict | None:
+        """Load a credential row scoped to an experience.
+
+        Args:
+            credential_id (str): Credential identifier to query.
+            experience_id (str): Experience identifier used to scope the lookup.
+
+        Returns:
+            dict | None: Matching credential row, or `None` when absent.
+
+        Raises:
+            AppError: Raised when Supabase operations fail.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -273,9 +340,25 @@ class UploadsWorkflow:
         return rows[0] if rows else None
 
     def _normalize_field_key(self, value: str | None) -> str:
+        """Normalize a field key for prompt-image storage metadata.
+
+        Args:
+            value (str | None): Raw field key from the API request.
+
+        Returns:
+            str: Lowercased key containing only letters, numbers, and underscores.
+        """
         return re.sub(r"[^a-z0-9_]", "_", str(value or "").strip().lower()).strip("_")
 
     def _clean_field_label(self, value: str | None) -> str:
+        """Trim and bound a human-readable field label.
+
+        Args:
+            value (str | None): Raw label value received from the client.
+
+        Returns:
+            str: Sanitized label capped at 120 characters.
+        """
         return str(value or "").strip()[:120]
 
     def _insert_upload_row(
@@ -285,6 +368,17 @@ class UploadsWorkflow:
         upload_type: str,
         storage_path: str,
     ) -> None:
+        """Insert an audit row describing a confirmed upload.
+
+        Args:
+            experience_id (str): Experience identifier that owns the upload.
+            credential_id (str): Credential associated with the upload.
+            upload_type (str): Logical upload type being recorded.
+            storage_path (str): Final storage path in Supabase Storage.
+
+        Raises:
+            AppError: Raised when the audit insert fails.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/uploads"
         try:
             response = requests.post(
@@ -324,6 +418,15 @@ class UploadsWorkflow:
     def _update_credential_photo_path(
         self, credential_id: str, storage_path: str
     ) -> None:
+        """Persist the uploaded user photo path on the credential row.
+
+        Args:
+            credential_id (str): Credential to update.
+            storage_path (str): Storage path of the uploaded user photo.
+
+        Raises:
+            AppError: Raised when the update fails.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/credentials?id=eq.{credential_id}"
         try:
             response = requests.patch(
@@ -359,6 +462,18 @@ class UploadsWorkflow:
         field_label: str,
         storage_path: str,
     ) -> None:
+        """Persist uploaded prompt-image metadata inside the credential payload.
+
+        Args:
+            credential_id (str): Credential to update.
+            credential (dict): Existing credential row containing `data_json`.
+            field_key (str): Normalized key of the prompt-image field.
+            field_label (str): Human-readable label associated with the field.
+            storage_path (str): Storage path of the uploaded prompt image.
+
+        Raises:
+            AppError: Raised when the update fails.
+        """
         current_data = (
             credential.get("data_json")
             if isinstance(credential.get("data_json"), dict)
@@ -410,6 +525,11 @@ class UploadsWorkflow:
             raise AppError("credential_prompt_image_update_failed", status_code=502)
 
     def _is_eager_generation_enabled(self) -> bool:
+        """Return whether uploads should trigger eager generation creation.
+
+        Returns:
+            bool: `True` when eager generation is enabled by environment variable.
+        """
         return os.getenv(
             "QUIZ_EAGER_GENERATION_ON_UPLOAD", "false"
         ).strip().lower() in {
@@ -420,6 +540,14 @@ class UploadsWorkflow:
         }
 
     def _kind_from_experience_type(self, experience_type: str) -> str:
+        """Map an experience type to the stored generation kind.
+
+        Args:
+            experience_type (str): Raw experience type string.
+
+        Returns:
+            str: Generation kind persisted in the `generations` table.
+        """
         clean_type = (experience_type or "").strip().lower()
         if clean_type == "credentialing":
             return "credential_card"
@@ -428,6 +556,18 @@ class UploadsWorkflow:
         return "quiz_result"
 
     def _find_reusable_generation(self, credential_id: str, kind: str) -> dict | None:
+        """Return the latest reusable generation for a credential and kind.
+
+        Args:
+            credential_id (str): Credential identifier to search by.
+            kind (str): Generation kind to reuse when possible.
+
+        Returns:
+            dict | None: Existing reusable generation row, or `None` when absent.
+
+        Raises:
+            AppError: Raised when Supabase operations fail.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -466,6 +606,20 @@ class UploadsWorkflow:
         kind: str,
         token: str | None = None,
     ) -> str:
+        """Insert a new pending generation row.
+
+        Args:
+            experience_id (str): Experience identifier associated with the generation.
+            credential_id (str): Credential identifier associated with the generation.
+            kind (str): Generation kind to persist.
+            token (str | None): Optional token stored with the generation row.
+
+        Returns:
+            str: Identifier of the inserted generation row.
+
+        Raises:
+            AppError: Raised when the insert fails or returns an empty payload.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/generations"
         try:
             response = requests.post(
@@ -516,6 +670,17 @@ class UploadsWorkflow:
         kind: str,
         token: str | None = None,
     ) -> tuple[str, bool]:
+        """Reuse a pending/processing generation or insert a new one.
+
+        Args:
+            experience_id (str): Experience identifier associated with the generation.
+            credential_id (str): Credential identifier associated with the generation.
+            kind (str): Generation kind to reuse or create.
+            token (str | None): Optional token stored with new generations.
+
+        Returns:
+            tuple[str, bool]: Generation identifier and whether it was reused.
+        """
         reusable = self._find_reusable_generation(credential_id, kind)
         if reusable and reusable.get("id"):
             generation_id = str(reusable["id"])

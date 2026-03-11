@@ -1,3 +1,5 @@
+"""Workflow responsible for generation lifecycle persistence and status queries."""
+
 import datetime as dt
 
 import requests
@@ -21,10 +23,27 @@ logger = get_logger(__name__)
 
 
 class GenerationsWorkflow:
+    """Create, reuse, and inspect generation rows and final card metadata.
+
+    Attributes:
+        settings (Settings): Runtime settings used for Supabase REST operations.
+    """
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     async def create_generation(self, request: CreateGenerationRequest) -> dict:
+        """Create or reuse a generation row for a credential.
+
+        Args:
+            request (CreateGenerationRequest): Generation creation request payload.
+
+        Returns:
+            dict: Success payload with generation id, reuse flag, and optional token.
+
+        Raises:
+            AppError: Raised when validation fails or Supabase operations fail.
+        """
         experience_id = (request.experience_id or "").strip()
         credential_id = (request.credential_id or "").strip()
         token = (request.phone or "").strip()
@@ -80,6 +99,17 @@ class GenerationsWorkflow:
         }
 
     async def get_generation_status(self, generation_id: str) -> dict:
+        """Return the current status payload for a generation.
+
+        Args:
+            generation_id (str): Generation identifier to query.
+
+        Returns:
+            dict: Status payload including output URLs when available.
+
+        Raises:
+            AppError: Raised when the id is missing, not found, or Supabase fails.
+        """
         clean_generation_id = (generation_id or "").strip()
         if not clean_generation_id:
             raise AppError("missing_generation_id", status_code=400)
@@ -144,6 +174,18 @@ class GenerationsWorkflow:
         }
 
     async def get_generation_logs(self, generation_id: str, limit: int = 200) -> dict:
+        """Return persisted generation logs for a generation id.
+
+        Args:
+            generation_id (str): Generation identifier to inspect.
+            limit (int): Maximum number of log entries to return.
+
+        Returns:
+            dict: Payload with generation id and ordered log entries.
+
+        Raises:
+            AppError: Raised when the id is missing or Supabase fails.
+        """
         clean_generation_id = (generation_id or "").strip()
         if not clean_generation_id:
             raise AppError("missing_generation_id", status_code=400)
@@ -208,6 +250,18 @@ class GenerationsWorkflow:
         generation_id: str,
         request: CreateGenerationFinalCardSignedUrlRequest,
     ) -> dict:
+        """Create a signed upload URL for a rendered final card image.
+
+        Args:
+            generation_id (str): Generation that owns the final card asset.
+            request (CreateGenerationFinalCardSignedUrlRequest): Upload request payload.
+
+        Returns:
+            dict: Signed upload payload containing URL, storage path, and bucket.
+
+        Raises:
+            AppError: Raised when validation fails or storage signing fails.
+        """
         clean_generation_id = (generation_id or "").strip()
         if not clean_generation_id:
             raise AppError("missing_generation_id", status_code=400)
@@ -296,6 +350,18 @@ class GenerationsWorkflow:
         generation_id: str,
         request: ConfirmGenerationFinalCardRequest,
     ) -> dict:
+        """Confirm a final card upload and persist its metadata on the generation row.
+
+        Args:
+            generation_id (str): Generation that owns the final card asset.
+            request (ConfirmGenerationFinalCardRequest): Confirmation payload with storage metadata.
+
+        Returns:
+            dict: Success payload containing the final card path and resolved URL.
+
+        Raises:
+            AppError: Raised when validation fails or persistence operations fail.
+        """
         clean_generation_id = (generation_id or "").strip()
         if not clean_generation_id:
             raise AppError("missing_generation_id", status_code=400)
@@ -338,6 +404,17 @@ class GenerationsWorkflow:
         }
 
     def _load_experience_by_id(self, experience_id: str) -> dict:
+        """Load an experience row by id.
+
+        Args:
+            experience_id (str): Experience identifier to query.
+
+        Returns:
+            dict: Matching experience row from Supabase.
+
+        Raises:
+            AppError: Raised when the row is missing or Supabase fails.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -366,6 +443,17 @@ class GenerationsWorkflow:
         return rows[0]
 
     def _load_generation_by_id(self, generation_id: str) -> dict:
+        """Load a generation row by id.
+
+        Args:
+            generation_id (str): Generation identifier to query.
+
+        Returns:
+            dict: Matching generation row from Supabase.
+
+        Raises:
+            AppError: Raised when the row is missing or Supabase fails.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -397,6 +485,18 @@ class GenerationsWorkflow:
         credential_id: str,
         experience_id: str,
     ) -> dict | None:
+        """Load a credential row scoped to an experience.
+
+        Args:
+            credential_id (str): Credential identifier to query.
+            experience_id (str): Experience identifier used to scope the lookup.
+
+        Returns:
+            dict | None: Matching credential row, or `None` when absent.
+
+        Raises:
+            AppError: Raised when Supabase operations fail.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -427,12 +527,32 @@ class GenerationsWorkflow:
         return rows[0] if rows else None
 
     def _count_done_generations(self, experience_id: str) -> int:
+        """Count finished generations for an experience.
+
+        Args:
+            experience_id (str): Experience identifier to count rows for.
+
+        Returns:
+            int: Number of completed generations for the experience.
+        """
         return self._count_rows(
             "generations",
             {"experience_id": f"eq.{experience_id}", "status": "eq.done"},
         )
 
     def _count_rows(self, table: str, filters: dict[str, str]) -> int:
+        """Count rows in a Supabase table using exact-count headers.
+
+        Args:
+            table (str): Table name to count rows from.
+            filters (dict[str, str]): Supabase filter parameters applied to the count query.
+
+        Returns:
+            int: Number of rows matching the requested filters.
+
+        Raises:
+            AppError: Raised when the count query fails.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/{table}"
         try:
             response = requests.get(
@@ -469,6 +589,14 @@ class GenerationsWorkflow:
         return len(rows)
 
     def _kind_from_experience_type(self, experience_type: str) -> str:
+        """Map an experience type to the stored generation kind.
+
+        Args:
+            experience_type (str): Raw experience type string.
+
+        Returns:
+            str: Generation kind persisted in the database.
+        """
         clean_type = (experience_type or "").strip().lower()
         if clean_type == "credentialing":
             return "credential_card"
@@ -477,6 +605,18 @@ class GenerationsWorkflow:
         return "quiz_result"
 
     def _find_reusable_generation(self, credential_id: str, kind: str) -> dict | None:
+        """Return the latest reusable generation for a credential and kind.
+
+        Args:
+            credential_id (str): Credential identifier to search by.
+            kind (str): Generation kind to reuse when possible.
+
+        Returns:
+            dict | None: Existing reusable generation row, or `None` when absent.
+
+        Raises:
+            AppError: Raised when Supabase operations fail.
+        """
         try:
             rows = get_json(
                 self.settings,
@@ -515,6 +655,20 @@ class GenerationsWorkflow:
         kind: str,
         token: str | None = None,
     ) -> str:
+        """Insert a new pending generation row.
+
+        Args:
+            experience_id (str): Experience identifier associated with the generation.
+            credential_id (str): Credential identifier associated with the generation.
+            kind (str): Generation kind to persist.
+            token (str | None): Optional token stored with the generation row.
+
+        Returns:
+            str: Identifier of the inserted generation row.
+
+        Raises:
+            AppError: Raised when the insert fails or returns an empty payload.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/generations"
         try:
             response = requests.post(
@@ -565,6 +719,17 @@ class GenerationsWorkflow:
         kind: str,
         token: str | None = None,
     ) -> tuple[str, bool]:
+        """Reuse a pending/processing generation or insert a new one.
+
+        Args:
+            experience_id (str): Experience identifier associated with the generation.
+            credential_id (str): Credential identifier associated with the generation.
+            kind (str): Generation kind to reuse or create.
+            token (str | None): Optional token stored with new generations.
+
+        Returns:
+            tuple[str, bool]: Generation identifier and whether it was reused.
+        """
         reusable = self._find_reusable_generation(credential_id, kind)
         if reusable and reusable.get("id"):
             generation_id = str(reusable["id"])
@@ -586,6 +751,15 @@ class GenerationsWorkflow:
         return generation_id, False
 
     def _update_generation_token(self, generation_id: str, token: str) -> None:
+        """Persist the provided token on an existing generation row.
+
+        Args:
+            generation_id (str): Generation identifier to update.
+            token (str): Token value to persist.
+
+        Raises:
+            AppError: Raised when the update fails.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/generations?id=eq.{generation_id}"
         try:
             response = requests.patch(
@@ -621,6 +795,17 @@ class GenerationsWorkflow:
         bucket: str,
         public_url: str | None,
     ) -> None:
+        """Persist final-card metadata on an existing generation row.
+
+        Args:
+            generation_id (str): Generation identifier to update.
+            storage_path (str): Storage path of the final card.
+            bucket (str): Storage bucket used for the final card.
+            public_url (str | None): Optional pre-resolved URL for the final card.
+
+        Raises:
+            AppError: Raised when the update fails.
+        """
         url = f"{self.settings.supabase_url}/rest/v1/generations?id=eq.{generation_id}"
         try:
             response = requests.patch(
@@ -659,6 +844,15 @@ class GenerationsWorkflow:
         storage_path: str,
         expires_in: int = 900,
     ) -> str | None:
+        """Build a temporary signed download URL for a storage object.
+
+        Args:
+            storage_path (str): Storage path to sign.
+            expires_in (int): Expiration time in seconds for the signed URL.
+
+        Returns:
+            str | None: Signed download URL, or `None` when signing fails.
+        """
         clean_storage_path = (storage_path or "").strip()
         if not clean_storage_path:
             return None
@@ -695,4 +889,9 @@ class GenerationsWorkflow:
         )
 
     def _now_iso(self) -> str:
+        """Return the current UTC timestamp in ISO-8601 format.
+
+        Returns:
+            str: Current UTC timestamp suffixed with `Z`.
+        """
         return dt.datetime.utcnow().isoformat() + "Z"

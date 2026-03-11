@@ -1,3 +1,5 @@
+"""Pydantic settings definitions backed by environment variables."""
+
 from functools import lru_cache
 
 from pydantic import Field
@@ -5,6 +7,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Application configuration loaded from environment variables and the local `.env`.
+
+    The settings model centralizes runtime values used by the API, Supabase integration,
+    and Gemini clients. Derived helpers expose normalized values consumed by the rest of
+    the backend.
+    """
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -33,15 +42,30 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
+        """Return the configured CORS origins as a normalized list of URLs.
+
+        Returns:
+            list[str]: Comma-separated origins split, trimmed, and filtered of blanks.
+        """
         return [
             item.strip() for item in self.app_cors_origins.split(",") if item.strip()
         ]
 
     @property
     def supabase_service_role(self) -> str:
+        """Expose the service-role key under the legacy property name.
+
+        Returns:
+            str: Supabase service-role token configured for privileged API calls.
+        """
         return self.supabase_service_role_key
 
 
 @lru_cache
 def get_settings() -> Settings:
+    """Load and cache the application settings singleton.
+
+    Returns:
+        Settings: Cached settings instance for the current process.
+    """
     return Settings()

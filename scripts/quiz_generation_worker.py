@@ -37,6 +37,16 @@ from app.infrastructure.supabase_rest import get_json, rest_headers
 
 @dataclass
 class Job:
+    """Serializable representation of a generation row claimed by the worker.
+
+    Attributes:
+        id (str): Generation identifier being processed.
+        experience_id (str): Experience associated with the generation.
+        credential_id (str): Credential whose data drives the generation.
+        kind (str): Generation kind stored in the queue row.
+        token (str): Optional token persisted with the generation row.
+    """
+
     id: str
     experience_id: str
     credential_id: str
@@ -50,6 +60,14 @@ _PROMPT_IMAGE_DATA_KEY = "_prompt_images"
 
 
 def _estimated_cost_usd(job: Job) -> float:
+    """Estimate the USD cost for a generation job based on its kind.
+
+    Args:
+        job (Job): Claimed generation job.
+
+    Returns:
+        float: Estimated cost in USD for the processed generation.
+    """
     # Allows tuning by kind via env while keeping a safe default.
     default = float(os.getenv("QUIZ_GENERATION_ESTIMATED_COST_USD", "0.04"))
     by_kind = {
@@ -71,9 +89,18 @@ def _write_generation_log(
     message: str,
     payload: dict | None = None,
 ):
-    """
-    Best effort structured log sink for each generation job.
-    If table is missing, worker continues without failing the generation.
+    """Persist a structured generation log entry and mirror it to stdout.
+
+    This sink is best-effort by design. Failures writing to `generation_logs` do not
+    interrupt the worker so generation processing can continue.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase writes.
+        generation_id (str): Generation identifier associated with the log.
+        level (str): Log severity level.
+        event (str): Short event identifier.
+        message (str): Human-readable log message.
+        payload (dict | None): Optional structured payload stored with the log.
     """
     try:
         print(
@@ -117,10 +144,24 @@ def _write_generation_log(
 
 
 def _now_iso() -> str:
+    """Return the current UTC timestamp in ISO-8601 format.
+
+    Returns:
+        str: Current UTC timestamp suffixed with `Z`.
+    """
     return dt.datetime.utcnow().isoformat() + "Z"
 
 
 def _claim_job(settings: Settings, job_id: str) -> Job | None:
+    """Atomically claim a pending generation row for processing.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase requests.
+        job_id (str): Pending generation identifier to claim.
+
+    Returns:
+        Job | None: Claimed job payload, or `None` when another worker won the claim.
+    """
     url = (
         f"{settings.supabase_url}/rest/v1/generations?id=eq.{job_id}&status=eq.pending"
     )
@@ -151,6 +192,18 @@ def _claim_job(settings: Settings, job_id: str) -> Job | None:
 
 
 def _load_credential_data(settings: Settings, credential_id: str) -> dict:
+    """Load the credential row required to build generation inputs.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase reads.
+        credential_id (str): Credential identifier to fetch.
+
+    Returns:
+        dict: Credential row containing `data_json` and `photo_path`.
+
+    Raises:
+        RuntimeError: Raised when the credential does not exist.
+    """
     rows = get_json(
         settings,
         "credentials",
@@ -166,6 +219,15 @@ def _load_credential_data(settings: Settings, credential_id: str) -> dict:
 def _load_experience_prompt_assets(
     settings: Settings, experience_id: str
 ) -> list[dict]:
+    """Load prompt-asset catalog rows for the current experience.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase reads.
+        experience_id (str): Experience identifier to fetch assets for.
+
+    Returns:
+        list[dict]: Prompt-asset rows, or an empty list when the table is unavailable.
+    """
     try:
         return get_json(
             settings,
@@ -180,6 +242,14 @@ def _load_experience_prompt_assets(
 
 
 def _ext_from_mime(mime: str) -> str:
+    """Map an image MIME type to a storage file extension.
+
+    Args:
+        mime (str): MIME type returned by Gemini or storage.
+
+    Returns:
+        str: File extension suitable for the generated asset path.
+    """
     m = (mime or "").lower()
     if "jpeg" in m or "jpg" in m:
         return "jpg"
@@ -191,6 +261,14 @@ def _ext_from_mime(mime: str) -> str:
 
 
 def _guess_mime_from_storage_path(storage_path: str) -> str:
+    """Infer a MIME type from a storage path extension.
+
+    Args:
+        storage_path (str): Storage path whose extension should be inspected.
+
+    Returns:
+        str: Best-effort MIME type guess for the storage object.
+    """
     p = (storage_path or "").lower()
     if p.endswith(".jpg") or p.endswith(".jpeg"):
         return "image/jpeg"
@@ -204,6 +282,18 @@ def _guess_mime_from_storage_path(storage_path: str) -> str:
 def _download_reference_image(
     settings: Settings, storage_path: str
 ) -> tuple[bytes, str]:
+    """Download a reference image from Supabase Storage.
+
+    Args:
+        settings (Settings): Runtime settings used for storage requests.
+        storage_path (str): Storage path of the reference image.
+
+    Returns:
+        tuple[bytes, str]: Downloaded image bytes and resolved MIME type.
+
+    Raises:
+        RuntimeError: Raised when the storage download fails.
+    """
     bucket = settings.supabase_bucket
     url = f"{settings.supabase_url}/storage/v1/object/{bucket}/{storage_path}"
     r = requests.get(url, headers=rest_headers(settings), timeout=40)
@@ -216,6 +306,14 @@ def _download_reference_image(
 
 
 def _extract_generation_inputs(cred_row: dict) -> tuple[str, str]:
+    """Extract normalized gender and hair color values from a credential row.
+
+    Args:
+        cred_row (dict): Credential row loaded from Supabase.
+
+    Returns:
+        tuple[str, str]: Supported gender and hair-color values for prompt generation.
+    """
     data = (
         cred_row.get("data_json") if isinstance(cred_row.get("data_json"), dict) else {}
     )
@@ -231,6 +329,16 @@ def _extract_generation_inputs(cred_row: dict) -> tuple[str, str]:
 def _load_archetype(
     settings: Settings, experience_id: str, archetype_id: str
 ) -> dict | None:
+    """Load a specific archetype for an experience.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase reads.
+        experience_id (str): Experience identifier to scope the lookup.
+        archetype_id (str): Archetype identifier to fetch.
+
+    Returns:
+        dict | None: Matching archetype row, or `None` when absent.
+    """
     if not archetype_id:
         return None
     rows = get_json(
@@ -244,6 +352,15 @@ def _load_archetype(
 
 
 def _load_first_archetype(settings: Settings, experience_id: str) -> dict | None:
+    """Load the first archetype configured for an experience.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase reads.
+        experience_id (str): Experience identifier to scope the lookup.
+
+    Returns:
+        dict | None: First archetype row ordered by `sort_order`, or `None` when absent.
+    """
     rows = get_json(
         settings,
         "archetypes",
@@ -257,10 +374,17 @@ def _load_first_archetype(settings: Settings, experience_id: str) -> dict | None
 def _resolve_experience_gemini_key(
     settings: Settings, experience_id: str
 ) -> str | None:
-    """
-    Strict mode:
-    - Use only experiences.gemini_api_key (per experience, set in panel).
-    - Do not fallback to global GEMINI_API_KEY.
+    """Resolve the per-experience Gemini API key in strict mode.
+
+    The worker intentionally does not fall back to the global `GEMINI_API_KEY`. This keeps
+    generation behavior deterministic and aligned with experience-level configuration.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase reads.
+        experience_id (str): Experience identifier whose API key should be resolved.
+
+    Returns:
+        str | None: Experience-specific Gemini API key, or `None` when unavailable.
     """
     try:
         rows = get_json(
@@ -351,10 +475,14 @@ _PROMPT_KEY_ALIASES = {
 def _resolve_prompt_variable_value(
     key: str, normalized_payload: dict[str, object]
 ) -> object | None:
-    """
-    Resolves a prompt variable value with alias fallback.
-    This avoids silent empty replacements when variable keys differ slightly
-    between builder/frontend and archetype prompt templates.
+    """Resolve a prompt variable value using direct keys and alias fallbacks.
+
+    Args:
+        key (str): Normalized placeholder key extracted from the template.
+        normalized_payload (dict[str, object]): Normalized payload used for interpolation.
+
+    Returns:
+        object | None: Matching value to inject into the prompt template, if any.
     """
     if not key:
         return None
@@ -385,6 +513,11 @@ def _resolve_prompt_variable_value(
 
 
 def _gemini_max_attempts() -> int:
+    """Return the configured maximum number of Gemini attempts.
+
+    Returns:
+        int: Maximum number of provider attempts before fallback behavior applies.
+    """
     try:
         return max(1, int(os.getenv("QUIZ_GEMINI_MAX_ATTEMPTS", "3")))
     except Exception:
@@ -392,6 +525,11 @@ def _gemini_max_attempts() -> int:
 
 
 def _gemini_retry_base_delay_seconds() -> float:
+    """Return the configured base delay used for Gemini retry backoff.
+
+    Returns:
+        float: Base retry delay in seconds.
+    """
     try:
         return max(0.1, float(os.getenv("QUIZ_GEMINI_RETRY_BASE_DELAY_SECONDS", "1.2")))
     except Exception:
@@ -399,6 +537,14 @@ def _gemini_retry_base_delay_seconds() -> float:
 
 
 def _is_retryable_gemini_error_message(message: str) -> bool:
+    """Determine whether a Gemini error message should be treated as retryable.
+
+    Args:
+        message (str): Error message raised during Gemini generation.
+
+    Returns:
+        bool: `True` when the worker should consider retrying the provider call.
+    """
     text = (message or "").strip().lower()
     if not text:
         return False
@@ -430,10 +576,28 @@ def _should_retry_gemini_error_message(
     attempt: int,
     max_attempts: int,
 ) -> bool:
+    """Determine whether another Gemini retry should be attempted.
+
+    Args:
+        message (str): Error message raised during Gemini generation.
+        attempt (int): Current attempt number, starting at one.
+        max_attempts (int): Maximum number of attempts allowed.
+
+    Returns:
+        bool: `True` when the worker should sleep and retry.
+    """
     return attempt < max_attempts and _is_retryable_gemini_error_message(message)
 
 
 def _strip_accents(text: str) -> str:
+    """Remove accent marks from a string while preserving its letters.
+
+    Args:
+        text (str): Text to normalize.
+
+    Returns:
+        str: Accent-free representation of the input.
+    """
     return "".join(
         ch
         for ch in unicodedata.normalize("NFD", text or "")
@@ -442,6 +606,14 @@ def _strip_accents(text: str) -> str:
 
 
 def _normalize_variable_key(raw: str) -> str:
+    """Normalize template and payload keys into a shared slug format.
+
+    Args:
+        raw (str): Raw placeholder or payload key.
+
+    Returns:
+        str: Lowercased key containing only letters, numbers, and underscores.
+    """
     key = (raw or "").strip()
     if not key:
         return ""
@@ -457,6 +629,14 @@ def _normalize_variable_key(raw: str) -> str:
 
 
 def _normalize_template_placeholders(template: str) -> str:
+    """Convert legacy placeholder syntaxes into the canonical `{{key}}` format.
+
+    Args:
+        template (str): Prompt template that may contain legacy placeholder styles.
+
+    Returns:
+        str: Prompt template with normalized placeholder markers.
+    """
     normalized = template or ""
     for pattern in _LEGACY_VAR_PATTERNS:
         normalized = pattern.sub(
@@ -467,9 +647,15 @@ def _normalize_template_placeholders(template: str) -> str:
 
 
 def _translate_prompt_value_to_english(value) -> str:
-    """
-    Converts dynamic prompt variable values to English before interpolation.
-    Keeps unknown words as-is to avoid data loss.
+    """Translate dynamic prompt values to English before interpolation.
+
+    Unknown words are preserved so the worker avoids losing user-provided information.
+
+    Args:
+        value: Value being interpolated into the prompt template.
+
+    Returns:
+        str: English-friendly representation of the provided value.
     """
     if value is None:
         return ""
@@ -500,6 +686,15 @@ def _translate_prompt_value_to_english(value) -> str:
 
 
 def _render_prompt_template(template: str, data: dict | None) -> str:
+    """Render a prompt template with normalized payload values.
+
+    Args:
+        template (str): Prompt template containing `{{variable}}` placeholders.
+        data (dict | None): Payload used to resolve template variables.
+
+    Returns:
+        str: Rendered prompt text with empty lines and whitespace normalized.
+    """
     raw = _normalize_template_placeholders(str(template or "")).strip()
     if not raw:
         return ""
@@ -527,6 +722,14 @@ def _render_prompt_template(template: str, data: dict | None) -> str:
 
 
 def _extract_prompt_image_assets(data: dict | None) -> dict[str, dict[str, str]]:
+    """Extract prompt-image metadata previously stored on the credential payload.
+
+    Args:
+        data (dict | None): Credential data payload.
+
+    Returns:
+        dict[str, dict[str, str]]: Prompt-image assets indexed by normalized field key.
+    """
     payload = data if isinstance(data, dict) else {}
     raw_assets = (
         payload.get(_PROMPT_IMAGE_DATA_KEY)
@@ -550,6 +753,14 @@ def _extract_prompt_image_assets(data: dict | None) -> dict[str, dict[str, str]]
 
 
 def _normalize_prompt_asset_selection(raw_value: object) -> list[str]:
+    """Normalize a prompt-asset selection payload into unique asset keys.
+
+    Args:
+        raw_value (object): Raw single-select or multi-select payload value.
+
+    Returns:
+        list[str]: Distinct normalized asset keys selected by the user.
+    """
     if raw_value is None:
         return []
     if isinstance(raw_value, list):
@@ -568,6 +779,16 @@ def _resolve_catalog_prompt_assets(
     data: dict | None,
     rows: list[dict] | None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Resolve fixed and selected catalog prompt assets for the current credential.
+
+    Args:
+        data (dict | None): Credential data payload.
+        rows (list[dict] | None): Prompt-asset catalog rows loaded from Supabase.
+
+    Returns:
+        tuple[list[dict[str, str]], dict[str, object]]: Deduplicated asset list to download
+        and prompt payload additions describing selected asset labels.
+    """
     payload = data if isinstance(data, dict) else {}
     asset_rows = rows if isinstance(rows, list) else []
     fixed_assets: list[dict[str, str]] = []
@@ -623,6 +844,15 @@ def _build_catalog_asset_prompt_appendix(
     assets: list[dict[str, str]] | None,
     prompt_payload: dict[str, object] | None,
 ) -> str:
+    """Build prompt instructions that force catalog assets to appear visibly.
+
+    Args:
+        assets (list[dict[str, str]] | None): Resolved fixed and selected catalog assets.
+        prompt_payload (dict[str, object] | None): Prompt payload describing selected labels.
+
+    Returns:
+        str: Prompt appendix with composition rules for fixed and selected assets.
+    """
     resolved_assets = assets if isinstance(assets, list) else []
     payload = prompt_payload if isinstance(prompt_payload, dict) else {}
 
@@ -701,6 +931,14 @@ def _build_catalog_asset_prompt_appendix(
 
 
 def _build_prompt_template_payload(data: dict | None) -> dict[str, object]:
+    """Prepare credential payload data for prompt-template interpolation.
+
+    Args:
+        data (dict | None): Credential data payload.
+
+    Returns:
+        dict[str, object]: Prompt payload enriched with prompt-image placeholders.
+    """
     payload = dict(data) if isinstance(data, dict) else {}
     for key, asset in _extract_prompt_image_assets(payload).items():
         payload[key] = {
@@ -714,6 +952,15 @@ def _select_prompt_image_assets(
     template: str,
     available_assets: dict[str, dict[str, str]],
 ) -> list[tuple[str, dict[str, str]]]:
+    """Select prompt-image assets referenced by the prompt template.
+
+    Args:
+        template (str): Prompt template used for generation.
+        available_assets (dict[str, dict[str, str]]): Prompt-image assets available on the credential.
+
+    Returns:
+        list[tuple[str, dict[str, str]]]: Ordered prompt-image assets that should be downloaded.
+    """
     if not available_assets:
         return []
 
@@ -731,6 +978,15 @@ def _select_prompt_image_assets(
 
 
 def _build_svg_card(job: Job, cred_row: dict) -> bytes:
+    """Build a fallback SVG card when Gemini generation is unavailable.
+
+    Args:
+        job (Job): Claimed generation job.
+        cred_row (dict): Credential row driving the generation.
+
+    Returns:
+        bytes: SVG document encoded as UTF-8 bytes.
+    """
     data = cred_row.get("data_json") or {}
     name = html.escape(str(data.get("name") or "Participante"))
     city = html.escape(str(data.get("city") or ""))
@@ -765,6 +1021,21 @@ def _upload_output(
     *,
     mime_type: str,
 ) -> str:
+    """Upload generated output bytes to Supabase Storage.
+
+    Args:
+        settings (Settings): Runtime settings used for storage requests.
+        experience_id (str): Experience identifier that owns the output.
+        generation_id (str): Generation identifier used in the output path.
+        data (bytes): Generated file contents to upload.
+        mime_type (str): MIME type associated with the output bytes.
+
+    Returns:
+        str: Storage path of the uploaded output asset.
+
+    Raises:
+        RuntimeError: Raised when the storage upload fails.
+    """
     bucket = settings.supabase_bucket
     ext = _ext_from_mime(mime_type)
     path = f"quiz/{experience_id}/generations/{generation_id}.{ext}"
@@ -785,6 +1056,14 @@ def _upload_output(
 
 
 def _finish_job_done(settings: Settings, job: Job, duration_ms: int, output_path: str):
+    """Mark a generation row as done and persist output metadata.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase requests.
+        job (Job): Claimed generation job.
+        duration_ms (int): Processing duration in milliseconds.
+        output_path (str): Storage path of the generated output.
+    """
     url = f"{settings.supabase_url}/rest/v1/generations?id=eq.{job.id}"
     body_with_cost = {
         "status": "done",
@@ -822,6 +1101,14 @@ def _finish_job_done(settings: Settings, job: Job, duration_ms: int, output_path
 
 
 def _finish_job_error(settings: Settings, job: Job, duration_ms: int, err: str):
+    """Mark a generation row as errored and persist failure metadata.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase requests.
+        job (Job): Claimed generation job.
+        duration_ms (int): Processing duration in milliseconds.
+        err (str): Error message associated with the failed job.
+    """
     url = f"{settings.supabase_url}/rest/v1/generations?id=eq.{job.id}"
     body_with_cost = {
         "status": "error",
@@ -854,6 +1141,12 @@ def _finish_job_error(settings: Settings, job: Job, duration_ms: int, err: str):
 
 
 def _process_job(settings: Settings, job: Job):
+    """Process a claimed generation job from credential load to final persistence.
+
+    Args:
+        settings (Settings): Runtime settings used for data access and provider calls.
+        job (Job): Claimed generation job to process.
+    """
     t0 = time.time()
     _write_generation_log(
         settings,
@@ -1261,6 +1554,15 @@ def _process_job(settings: Settings, job: Job):
 
 
 def _fetch_pending(settings: Settings, limit: int) -> list[str]:
+    """Fetch pending generation identifiers from the queue table.
+
+    Args:
+        settings (Settings): Runtime settings used for Supabase reads.
+        limit (int): Maximum number of pending ids to fetch.
+
+    Returns:
+        list[str]: Pending generation identifiers ordered by creation time.
+    """
     rows = get_json(
         settings,
         "generations",
@@ -1272,6 +1574,11 @@ def _fetch_pending(settings: Settings, limit: int) -> list[str]:
 
 
 def main() -> int:
+    """Run the generation worker loop until interrupted or a single batch completes.
+
+    Returns:
+        int: Process exit code for the worker command.
+    """
     load_dotenv()
     parser = argparse.ArgumentParser(description="Run quiz generation worker")
     parser.add_argument("--max-workers", type=int, default=5, help="Concurrent jobs")

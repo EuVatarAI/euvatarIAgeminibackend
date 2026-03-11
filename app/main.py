@@ -1,3 +1,5 @@
+"""Application entrypoint and HTTP middleware configuration for the FastAPI backend."""
+
 import time
 import uuid
 
@@ -32,6 +34,22 @@ app.add_middleware(
 
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
+    """Log request lifecycle metadata and propagate a trace identifier.
+
+    The middleware creates or reuses a request identifier, stores it on the request state,
+    and injects it into the logging context for downstream handlers. It also records
+    request duration and exposes the trace id in the response headers.
+
+    Args:
+        request (Request): Incoming FastAPI request object.
+        call_next: Next ASGI handler in the middleware chain.
+
+    Returns:
+        Response: The HTTP response produced by the downstream application.
+
+    Raises:
+        Exception: Re-raises any unhandled exception from downstream request processing.
+    """
     trace_id = (request.headers.get("X-Request-Id") or "").strip() or str(uuid.uuid4())
     request.state.trace_id = trace_id
     request.state.request_started_at = time.time()
