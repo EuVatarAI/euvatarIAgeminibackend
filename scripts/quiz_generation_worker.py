@@ -793,6 +793,7 @@ def _resolve_catalog_prompt_assets(
     asset_rows = rows if isinstance(rows, list) else []
     fixed_assets: list[dict[str, str]] = []
     selectable_assets: dict[str, dict[str, dict[str, str]]] = {}
+    prompt_payload: dict[str, object] = {}
 
     for row in asset_rows:
         storage_path = str(row.get("storage_path") or "").strip()
@@ -807,6 +808,10 @@ def _resolve_catalog_prompt_assets(
         }
         if bool(row.get("required")):
             fixed_assets.append(asset)
+            # Required catalog assets are always available to the prompt
+            # through their asset key so the builder can explicitly reference
+            # them, e.g. {{paredebranca}}.
+            prompt_payload[asset_key] = label
             continue
         variable_key = _normalize_variable_key(str(row.get("variable_key") or ""))
         if not variable_key:
@@ -814,7 +819,6 @@ def _resolve_catalog_prompt_assets(
         selectable_assets.setdefault(variable_key, {})[asset_key] = asset
 
     selected_assets: list[dict[str, str]] = []
-    prompt_payload: dict[str, object] = {}
     for variable_key, available_assets in selectable_assets.items():
         selected_keys = _normalize_prompt_asset_selection(payload.get(variable_key))
         if not selected_keys:
