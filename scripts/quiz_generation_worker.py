@@ -57,6 +57,7 @@ class Job:
 _ALLOWED_GENDERS = {"mulher", "homem"}
 _ALLOWED_HAIR_COLORS = {"loiro", "castanho", "preto", "ruivo", "grisalho"}
 _PROMPT_IMAGE_DATA_KEY = "_prompt_images"
+_USER_PROMPT_TEMPLATE_KEY = "_user_prompt_template"
 
 
 def _estimated_cost_usd(job: Job) -> float:
@@ -721,6 +722,32 @@ def _render_prompt_template(template: str, data: dict | None) -> str:
     return rendered
 
 
+def _prepare_generation_prompt(base_prompt: str, appendix: str = "") -> str:
+    """Compact and sanitize the final prompt sent to Gemini.
+
+    Args:
+        base_prompt (str): Rendered prompt body coming from the user or archetype.
+        appendix (str): Additional composition instructions derived from catalog assets.
+
+    Returns:
+        str: Sanitized single-paragraph prompt optimized for image generation.
+    """
+    sections: list[str] = [
+        "Create a purely visual image with zero readable text, letters, labels, captions, logos, signage, or watermarks anywhere."
+    ]
+
+    for raw_section in (base_prompt, appendix):
+        text = str(raw_section or "").strip()
+        if not text:
+            continue
+        text = re.sub(r"\{\{[^}]+\}\}", "", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            sections.append(text)
+
+    return " ".join(section for section in sections if section).strip()
+
+
 def _extract_prompt_image_assets(data: dict | None) -> dict[str, dict[str, str]]:
     """Extract prompt-image metadata previously stored on the credential payload.
 
@@ -805,6 +832,7 @@ def _resolve_catalog_prompt_assets(
             "asset_key": asset_key,
             "label": label,
             "storage_path": storage_path,
+            "required": "true" if bool(row.get("required")) else "false",
         }
         if bool(row.get("required")):
             fixed_assets.append(asset)
@@ -860,8 +888,16 @@ def _build_catalog_asset_prompt_appendix(
     resolved_assets = assets if isinstance(assets, list) else []
     payload = prompt_payload if isinstance(prompt_payload, dict) else {}
 
+    fixed_asset_keys = {
+        str(asset.get("asset_key") or "").strip()
+        for asset in resolved_assets
+        if str(asset.get("required") or "").strip().lower() == "true"
+    }
+
     selected_labels: list[str] = []
-    for value in payload.values():
+    for key, value in payload.items():
+        if str(key or "").strip() in fixed_asset_keys:
+            continue
         if isinstance(value, list):
             for item in value:
                 label = str(item or "").strip()
@@ -878,8 +914,8 @@ def _build_catalog_asset_prompt_appendix(
             [
                 str(asset.get("label") or "").strip()
                 for asset in resolved_assets
-                if str(asset.get("label") or "").strip()
-                and str(asset.get("label") or "").strip() not in selected_labels
+                if str(asset.get("required") or "").strip().lower() == "true"
+                and str(asset.get("label") or "").strip()
             ]
         )
     )
@@ -893,43 +929,45 @@ def _build_catalog_asset_prompt_appendix(
         _translate_prompt_value_to_english(label) for label in selected_labels
     ]
 
-    instructions: list[str] = []
+    instructions: list[str] = [
+        "Zero readable text anywhere in the image: no words, letters, labels, captions, logos, signage, subtitles, or watermarks."
+    ]
     if fixed_labels:
         instructions.append(
-            "Mandatory fixed reference assets that must define the scene structure: "
+            "Required fixed scene references: "
             + ", ".join(fixed_prompt_labels)
             + "."
         )
     if selected_labels:
         instructions.append(
-            "Mandatory selected visual elements that must be clearly visible in the final image: "
+            "Required visible selected elements: "
             + ", ".join(selected_prompt_labels)
             + "."
         )
         if len(selected_prompt_labels) == 1:
             instructions.append(
-                "Do not omit, hide, or replace the selected visual element. Integrate it into the composition in an obvious and readable way."
+                "Show the selected element clearly as a visible object."
             )
         elif len(selected_prompt_labels) <= 3:
             instructions.append(
-                "Do not omit, hide, or replace any selected visual element. Integrate every selected element into the composition in an obvious and readable way, with each one individually recognizable."
+                "Show every selected element clearly, with each one individually recognizable."
             )
         elif len(selected_prompt_labels) <= 8:
             instructions.append(
-                "There are multiple selected visual elements. Arrange them as a balanced collectible composition around the participant, using shelves, accessories, props, or layered product placement so every selected element remains individually visible."
+                "Arrange the selected elements as a balanced collectible composition so each one remains individually visible."
             )
         else:
             instructions.append(
-                "There are many selected visual elements. Use a structured collage or curated display system inside and around the packaging, such as miniature props, side compartments, icon cards, stickers, shelves, or printed inserts, so the final composition still represents all selected elements."
+                "Use a structured collectible display so the final composition still represents all selected elements."
             )
         instructions.append(
-            "Use the provided reference images for the selected assets as the source of truth for visual identity, shape, and object appearance."
+            "Use the provided reference images as the source of truth for object identity and appearance."
         )
     instructions.append(
-        "The participant must remain the main subject, but the fixed and selected assets must appear as explicit visual objects in the final composition."
+        "The participant must remain the main subject, but all required assets must appear as explicit visual objects."
     )
     instructions.append(
-        "If the number of selected assets is high, reduce their size and distribute them intelligently, but do not silently remove selected assets from the scene."
+        "If many assets are selected, reduce their size and distribute them intelligently, but do not remove them from the scene."
     )
     return "\n".join(instructions)
 
@@ -950,6 +988,26 @@ def _build_prompt_template_payload(data: dict | None) -> dict[str, object]:
             "label": str(asset.get("label") or key).strip() or key,
         }
     return payload
+
+
+def _resolve_generation_prompt_template(
+    data: dict | None,
+    archetype: dict | None,
+) -> tuple[str, str]:
+    """Resolve the prompt template source used for generation.
+
+    Args:
+        data (dict | None): Credential data payload.
+        archetype (dict | None): Archetype row associated with the generation.
+
+    Returns:
+        tuple[str, str]: Raw prompt template and its source identifier.
+    """
+    payload = data if isinstance(data, dict) else {}
+    user_prompt = str(payload.get(_USER_PROMPT_TEMPLATE_KEY) or "").strip()
+    if user_prompt:
+        return user_prompt, "user"
+    return str((archetype or {}).get("image_prompt") or ""), "archetype"
 
 
 def _select_prompt_image_assets(
@@ -1242,25 +1300,27 @@ def _process_job(settings: Settings, job: Job):
         )
         if not archetype:
             archetype = _load_first_archetype(settings, job.experience_id)
-        raw_archetype_prompt = str((archetype or {}).get("image_prompt") or "")
-        archetype_prompt = _render_prompt_template(
-            raw_archetype_prompt, prompt_template_payload
+        raw_prompt_template, prompt_source = _resolve_generation_prompt_template(
+            cred_data,
+            archetype,
+        )
+        rendered_prompt = _render_prompt_template(
+            raw_prompt_template, prompt_template_payload
         )
         catalog_asset_appendix = _build_catalog_asset_prompt_appendix(
             catalog_assets,
             catalog_prompt_payload,
         )
-        if catalog_asset_appendix:
-            archetype_prompt = (
-                f"{archetype_prompt}\n\n{catalog_asset_appendix}".strip()
-                if archetype_prompt
-                else catalog_asset_appendix
-            )
+        archetype_prompt = _prepare_generation_prompt(
+            rendered_prompt,
+            catalog_asset_appendix,
+        )
         prompt_image_assets = _select_prompt_image_assets(
-            raw_archetype_prompt,
+            raw_prompt_template,
             _extract_prompt_image_assets(cred_data),
         )
-        prompt_source = "archetype" if archetype_prompt else "fixed_default"
+        if not archetype_prompt:
+            prompt_source = "fixed_default"
 
         # Preferred mode: Gemini generation. With photo when available; prompt-only when archetype allows it.
         effective_gemini_key = _resolve_experience_gemini_key(

@@ -23,11 +23,13 @@ _ALLOWED_VARIABLE_FIELD_TYPES = {
     "phone",
     "number",
     "select",
+    "prompt_text",
     "prompt_image",
     "prompt_asset_select",
     "prompt_asset_multi_select",
 }
 _MAX_LEAD_VALUE_LENGTH = 300
+_MAX_PROMPT_TEXT_LENGTH = 5000
 _MAX_LEAD_FIELD_COUNT = 30
 _MAX_MULTI_SELECT_ASSETS = 12
 
@@ -555,11 +557,17 @@ class PublicExperiencesWorkflow:
         value = self._sanitize_string_value(raw_value)
         return value or None
 
-    def _sanitize_string_value(self, raw_value: Any) -> str:
+    def _sanitize_string_value(
+        self,
+        raw_value: Any,
+        *,
+        max_length: int = _MAX_LEAD_VALUE_LENGTH,
+    ) -> str:
         """Trim a scalar value and enforce the per-field size limit.
 
         Args:
             raw_value (Any): Incoming value to sanitize.
+            max_length (int): Maximum allowed string length for the field.
 
         Returns:
             str: Trimmed string representation of the value.
@@ -568,7 +576,7 @@ class PublicExperiencesWorkflow:
             AppError: Raised when the resulting string exceeds the maximum length.
         """
         value = str(raw_value or "").strip()
-        if len(value) > _MAX_LEAD_VALUE_LENGTH:
+        if len(value) > max_length:
             raise AppError("value_too_large", status_code=400)
         return value
 
@@ -616,7 +624,12 @@ class PublicExperiencesWorkflow:
             if values:
                 self._validate_field_value(key, values, rule, selectable_assets)
             return values
-        value = self._sanitize_string_value(raw_value)
+        max_length = (
+            _MAX_PROMPT_TEXT_LENGTH
+            if field_type == "prompt_text"
+            else _MAX_LEAD_VALUE_LENGTH
+        )
+        value = self._sanitize_string_value(raw_value, max_length=max_length)
         if not value:
             return ""
         self._validate_field_value(key, value, rule, selectable_assets)
