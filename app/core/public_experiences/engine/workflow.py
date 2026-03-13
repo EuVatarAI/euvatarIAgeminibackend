@@ -23,7 +23,6 @@ _ALLOWED_VARIABLE_FIELD_TYPES = {
     "phone",
     "number",
     "select",
-    "prompt_text",
     "prompt_image",
     "prompt_asset_select",
     "prompt_asset_multi_select",
@@ -69,10 +68,13 @@ class PublicExperiencesWorkflow:
         selectable_assets_by_variable = self._group_selectable_assets_by_variable(
             prompt_assets
         )
-        lead_fields = [
-            self._map_variable_to_field(row, selectable_assets_by_variable)
-            for row in variables
-        ]
+        lead_fields = []
+        for row in variables:
+            field_payload = self._map_variable_to_field(
+                row, selectable_assets_by_variable
+            )
+            if field_payload:
+                lead_fields.append(field_payload)
         config = (
             experience.get("config_json")
             if isinstance(experience.get("config_json"), dict)
@@ -423,7 +425,7 @@ class PublicExperiencesWorkflow:
         self,
         row: dict,
         selectable_assets_by_variable: dict[str, list[dict[str, str | None]]],
-    ) -> dict:
+    ) -> dict | None:
         """Map a variable row into the public lead-field payload shape.
 
         Args:
@@ -432,9 +434,12 @@ class PublicExperiencesWorkflow:
                 Selectable prompt assets grouped by variable key.
 
         Returns:
-            dict: Lead-field payload consumed by the public player.
+            dict | None: Lead-field payload consumed by the public player, or
+                `None` when the variable should stay internal to the builder.
         """
         field_type = str(row.get("field_type") or "text").strip().lower()
+        if field_type == "prompt_text":
+            return None
         if field_type not in _ALLOWED_VARIABLE_FIELD_TYPES:
             field_type = "text"
         variable_key = self._normalize_variable_key(str(row.get("variable_key") or ""))
@@ -613,6 +618,8 @@ class PublicExperiencesWorkflow:
             Any | None: Normalized value ready for persistence, or `None` when omitted.
         """
         field_type = str(rule.get("field_type") or "text").strip().lower()
+        if field_type == "prompt_text":
+            return None
         if field_type not in _ALLOWED_VARIABLE_FIELD_TYPES:
             return self._normalize_untyped_field_value(raw_value)
         if field_type == "prompt_image":
@@ -624,12 +631,7 @@ class PublicExperiencesWorkflow:
             if values:
                 self._validate_field_value(key, values, rule, selectable_assets)
             return values
-        max_length = (
-            _MAX_PROMPT_TEXT_LENGTH
-            if field_type == "prompt_text"
-            else _MAX_LEAD_VALUE_LENGTH
-        )
-        value = self._sanitize_string_value(raw_value, max_length=max_length)
+        value = self._sanitize_string_value(raw_value, max_length=_MAX_LEAD_VALUE_LENGTH)
         if not value:
             return ""
         self._validate_field_value(key, value, rule, selectable_assets)

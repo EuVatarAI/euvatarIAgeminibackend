@@ -16,23 +16,33 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
             worker._is_retryable_gemini_error_message("gemini_no_image_in_response")
         )
 
-    def test_user_prompt_template_overrides_archetype_prompt(self) -> None:
-        """Use the user's dynamic prompt when it is present on the credential."""
+    def test_builder_prompt_is_always_used_for_generation(self) -> None:
+        """Keep the generation prompt sourced from the configured builder prompt."""
         raw_prompt, prompt_source = worker._resolve_generation_prompt_template(
-            {"_user_prompt_template": "Use {{foto_do_neymar}} aqui"},
-            {"image_prompt": "fallback"},
+            {"_user_prompt_template": "ignorado"},
+            {"image_prompt": "prompt do construtor"},
         )
-        self.assertEqual(raw_prompt, "Use {{foto_do_neymar}} aqui")
-        self.assertEqual(prompt_source, "user")
+        self.assertEqual(raw_prompt, "prompt do construtor")
+        self.assertEqual(prompt_source, "builder")
 
-    def test_archetype_prompt_is_used_when_user_prompt_is_missing(self) -> None:
-        """Fallback to the archetype prompt when there is no dynamic user prompt."""
+    def test_photo_identity_clause_is_added_when_requested(self) -> None:
+        """Force the generated image to preserve the participant identity."""
+        prompt = worker._prepare_generation_prompt(
+            "prompt base",
+            "",
+            enforce_photo_identity=True,
+        )
+        self.assertIn("sole source of facial identity", prompt)
+        self.assertIn("Do not invent a generic person", prompt)
+
+    def test_builder_prompt_is_used_without_dynamic_override(self) -> None:
+        """Use the configured builder prompt even without extra credential fields."""
         raw_prompt, prompt_source = worker._resolve_generation_prompt_template(
             {},
             {"image_prompt": "prompt do arquétipo"},
         )
         self.assertEqual(raw_prompt, "prompt do arquétipo")
-        self.assertEqual(prompt_source, "archetype")
+        self.assertEqual(prompt_source, "builder")
 
     def test_retryable_error_retries_before_last_attempt(self) -> None:
         """Retry retryable Gemini failures before the final allowed attempt."""

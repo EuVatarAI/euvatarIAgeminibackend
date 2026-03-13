@@ -12,6 +12,7 @@ import base64
 import datetime as dt
 import html
 import json
+import logging
 import os
 import re
 import sys
@@ -33,6 +34,9 @@ from app.core.settings import Settings
 from app.application.services.image_prompt_builder import build_editorial_prompt
 from app.infrastructure.gemini_image_client import GeminiImageClient
 from app.infrastructure.supabase_rest import get_json, rest_headers
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,7 +61,6 @@ class Job:
 _ALLOWED_GENDERS = {"mulher", "homem"}
 _ALLOWED_HAIR_COLORS = {"loiro", "castanho", "preto", "ruivo", "grisalho"}
 _PROMPT_IMAGE_DATA_KEY = "_prompt_images"
-_USER_PROMPT_TEMPLATE_KEY = "_user_prompt_template"
 
 
 def _estimated_cost_usd(job: Job) -> float:
@@ -104,24 +107,24 @@ def _write_generation_log(
         payload (dict | None): Optional structured payload stored with the log.
     """
     try:
-        print(
+        log_message = (
             "[GENERATION_LOG] "
             f"generation_id={generation_id} "
             f"level={level} "
             f"event={event} "
             f"message={message} "
-            f"payload={json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)}",
-            flush=True,
+            f"payload={json.dumps(payload or {}, ensure_ascii=True, sort_keys=True)}"
         )
     except Exception:
-        print(
+        log_message = (
             "[GENERATION_LOG] "
             f"generation_id={generation_id} "
             f"level={level} "
             f"event={event} "
-            f"message={message}",
-            flush=True,
+            f"message={message}"
         )
+
+    logger.log(getattr(logging, str(level or "INFO").upper(), logging.INFO), log_message)
 
     url = f"{settings.supabase_url}/rest/v1/generation_logs"
     body = [
@@ -722,7 +725,12 @@ def _render_prompt_template(template: str, data: dict | None) -> str:
     return rendered
 
 
-def _prepare_generation_prompt(base_prompt: str, appendix: str = "") -> str:
+def _prepare_generation_prompt(
+    base_prompt: str,
+    appendix: str = "",
+    *,
+    enforce_photo_identity: bool = False,
+) -> str:
     """Compact and sanitize the final prompt sent to Gemini.
 
     Args:
@@ -735,6 +743,10 @@ def _prepare_generation_prompt(base_prompt: str, appendix: str = "") -> str:
     sections: list[str] = [
         "Create a purely visual image with zero readable text, letters, labels, captions, logos, signage, or watermarks anywhere."
     ]
+    if enforce_photo_identity:
+        sections.append(
+            "Use the uploaded participant photo as the sole source of facial identity and recognizability. Do not invent a generic person, do not replace the face, and keep the participant clearly identifiable."
+        )
 
     for raw_section in (base_prompt, appendix):
         text = str(raw_section or "").strip()
@@ -1003,11 +1015,8 @@ def _resolve_generation_prompt_template(
     Returns:
         tuple[str, str]: Raw prompt template and its source identifier.
     """
-    payload = data if isinstance(data, dict) else {}
-    user_prompt = str(payload.get(_USER_PROMPT_TEMPLATE_KEY) or "").strip()
-    if user_prompt:
-        return user_prompt, "user"
-    return str((archetype or {}).get("image_prompt") or ""), "archetype"
+    del data
+    return str((archetype or {}).get("image_prompt") or ""), "builder"
 
 
 def _select_prompt_image_assets(
@@ -1314,6 +1323,7 @@ def _process_job(settings: Settings, job: Job):
         archetype_prompt = _prepare_generation_prompt(
             rendered_prompt,
             catalog_asset_appendix,
+            enforce_photo_identity=bool(photo_path),
         )
         prompt_image_assets = _select_prompt_image_assets(
             raw_prompt_template,
@@ -1670,6 +1680,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("QUIZ_WORKER_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        force=True,
+    )
+
     settings = Settings.load()
     max_workers = max(1, int(args.max_workers))
     batch_size = max(1, int(args.batch_size))
@@ -1686,10 +1702,11 @@ def main() -> int:
             sleep_s = min(
                 net_retry_max, net_retry_base * (2 ** max(0, net_error_count - 1))
             )
-            print(
-                f"[WORKER] network_fetch_pending_error attempt={net_error_count} "
-                f"sleep_s={sleep_s:.1f} err={exc}",
-                flush=True,
+            logger.warning(
+                "[WORKER] network_fetch_pending_error attempt=%s sleep_s=%.1f err=%s",
+                net_error_count,
+                sleep_s,
+                exc,
             )
             if args.once:
                 return 1

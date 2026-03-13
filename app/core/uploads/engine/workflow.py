@@ -531,7 +531,7 @@ class UploadsWorkflow:
             bool: `True` when eager generation is enabled by environment variable.
         """
         return os.getenv(
-            "QUIZ_EAGER_GENERATION_ON_UPLOAD", "false"
+            "QUIZ_EAGER_GENERATION_ON_UPLOAD", "true"
         ).strip().lower() in {
             "1",
             "true",
