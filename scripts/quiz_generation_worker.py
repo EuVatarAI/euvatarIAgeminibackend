@@ -321,13 +321,47 @@ def _extract_generation_inputs(cred_row: dict) -> tuple[str, str]:
     data = (
         cred_row.get("data_json") if isinstance(cred_row.get("data_json"), dict) else {}
     )
-    gender = str((data or {}).get("gender") or "mulher").strip().lower()
-    hair_color = str((data or {}).get("hair_color") or "castanho").strip().lower()
-    if gender not in _ALLOWED_GENDERS:
-        gender = "mulher"
-    if hair_color not in _ALLOWED_HAIR_COLORS:
-        hair_color = "castanho"
+    normalized_data = {
+        _normalize_variable_key(str(key)): value for key, value in (data or {}).items()
+    }
+
+    gender = "mulher"
+    for key in _GENERATION_GENDER_KEYS:
+        raw_value = normalized_data.get(_normalize_variable_key(key))
+        normalized = _normalize_generation_choice(
+            raw_value,
+            _GENDER_VALUE_ALIASES,
+        )
+        if normalized in _ALLOWED_GENDERS:
+            gender = normalized
+            break
+
+    hair_color = "castanho"
+    for key in _GENERATION_HAIR_COLOR_KEYS:
+        raw_value = normalized_data.get(_normalize_variable_key(key))
+        normalized = _normalize_generation_choice(
+            raw_value,
+            _HAIR_COLOR_VALUE_ALIASES,
+        )
+        if normalized in _ALLOWED_HAIR_COLORS:
+            hair_color = normalized
+            break
+
     return gender, hair_color
+
+
+def _normalize_generation_choice(
+    raw_value: object,
+    aliases: dict[str, str],
+) -> str:
+    """Normalize a generation trait value using a canonical alias map."""
+    text = str(raw_value or "").strip().lower()
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return aliases.get(normalized, normalized)
 
 
 def _load_archetype(
@@ -474,6 +508,49 @@ _PROMPT_KEY_ALIASES = {
         "cor_do_cabelo_participante",
     ],
 }
+
+_GENDER_VALUE_ALIASES = {
+    "mulher": "mulher",
+    "feminino": "mulher",
+    "female": "mulher",
+    "woman": "mulher",
+    "homem": "homem",
+    "masculino": "homem",
+    "male": "homem",
+    "man": "homem",
+}
+
+_HAIR_COLOR_VALUE_ALIASES = {
+    "loiro": "loiro",
+    "blond": "loiro",
+    "blonde": "loiro",
+    "castanho": "castanho",
+    "brown": "castanho",
+    "brunette": "castanho",
+    "preto": "preto",
+    "black": "preto",
+    "ruivo": "ruivo",
+    "red": "ruivo",
+    "ginger": "ruivo",
+    "grisalho": "grisalho",
+    "gray": "grisalho",
+    "grey": "grisalho",
+}
+
+_GENERATION_GENDER_KEYS = (
+    "gender",
+    "genero",
+    "sexo",
+    "genero_para_criacao_do_avatar",
+)
+
+_GENERATION_HAIR_COLOR_KEYS = (
+    "hair_color",
+    "cor_do_cabelo",
+    "cor_do_seu_cabelo",
+    "cor_cabelo",
+    "cor_do_cabelo_participante",
+)
 
 
 def _resolve_prompt_variable_value(
@@ -730,6 +807,7 @@ def _prepare_generation_prompt(
     appendix: str = "",
     *,
     enforce_photo_identity: bool = False,
+    appearance_traits: str = "",
 ) -> str:
     """Compact and sanitize the final prompt sent to Gemini.
 
@@ -747,17 +825,87 @@ def _prepare_generation_prompt(
         sections.append(
             "Use the uploaded participant photo as the sole source of facial identity and recognizability. Do not invent a generic person, do not replace the face, and keep the participant clearly identifiable."
         )
+        sections.append(
+            "Prioritize exact facial resemblance to the uploaded participant over toy stylization, beauty enhancement, or generic doll features."
+        )
+        sections.append(
+            "The final figure must look like the same real person from the uploaded photo, not an approximation."
+        )
+        sections.append(
+            "Do not invent personal attributes that are not visible in the uploaded photo. Do not add glasses, hats, jewelry, facial hair, tattoos, or clothing details unless they are clearly present in the participant photo."
+        )
+    if appearance_traits.strip():
+        sections.append(
+            "Requested appearance traits for the figure: "
+            + appearance_traits.strip().rstrip(".")
+            + "."
+        )
 
     for raw_section in (base_prompt, appendix):
         text = str(raw_section or "").strip()
         if not text:
             continue
         text = re.sub(r"\{\{[^}]+\}\}", "", text)
+        text = _dedupe_prompt_sentences(text)
         text = re.sub(r"\s+", " ", text).strip()
         if text:
             sections.append(text)
 
     return " ".join(section for section in sections if section).strip()
+
+
+def _dedupe_prompt_sentences(text: str) -> str:
+    """Remove repeated prompt sentences while preserving the original order."""
+    parts = re.split(r"(?<=[.!?])\s+|\n+", str(text or "").strip())
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for part in parts:
+        sentence = re.sub(r"\s+", " ", str(part or "")).strip()
+        if not sentence:
+            continue
+        normalized = sentence.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(sentence)
+    return " ".join(deduped)
+
+
+def _asset_matches_white_box_reference(asset: dict[str, str]) -> bool:
+    """Return whether a resolved catalog asset represents the white box background."""
+    candidates = [
+        _normalize_variable_key(str(asset.get("asset_key") or "")),
+        _normalize_variable_key(str(asset.get("label") or "")),
+    ]
+    return any(
+        token in candidate
+        for candidate in candidates
+        for token in (
+            "paredebranca",
+            "parede_branca",
+            "fundobranco",
+            "fundo_branco",
+            "caixabranca",
+            "caixa_branca",
+            "whitebox",
+            "white_box",
+            "whitebackground",
+            "white_background",
+            "whitepaddedbox",
+        )
+    )
+
+
+def _build_appearance_traits(gender: str, hair_color: str) -> str:
+    """Render a compact English appearance clause from normalized traits."""
+    gender_text = _translate_prompt_value_to_english(gender)
+    hair_text = _translate_prompt_value_to_english(hair_color)
+    traits: list[str] = []
+    if gender_text:
+        traits.append(str(gender_text))
+    if hair_text:
+        traits.append(f"{hair_text} hair")
+    return ", ".join(traits)
 
 
 def _extract_prompt_image_assets(data: dict | None) -> dict[str, dict[str, str]]:
@@ -940,10 +1088,23 @@ def _build_catalog_asset_prompt_appendix(
     selected_prompt_labels = [
         _translate_prompt_value_to_english(label) for label in selected_labels
     ]
+    has_white_box_reference = any(
+        _asset_matches_white_box_reference(asset) for asset in resolved_assets
+    )
 
     instructions: list[str] = [
         "Zero readable text anywhere in the image: no words, letters, labels, captions, logos, signage, subtitles, or watermarks."
     ]
+    if has_white_box_reference:
+        instructions.extend(
+            [
+                "Use the provided white box/background reference as the exact structural container of the scene.",
+                "Keep the white box unchanged and let it fill the entire frame from top to bottom.",
+                "The final image must be vertical 9:16. Do not generate square or horizontal compositions.",
+                "Keep the participant and all accessories fully inside the box boundaries.",
+                "Do not crop the participant or any accessory at the frame edges.",
+            ]
+        )
     if fixed_labels:
         instructions.append(
             "Required fixed scene references: "
@@ -956,17 +1117,23 @@ def _build_catalog_asset_prompt_appendix(
             + ", ".join(selected_prompt_labels)
             + "."
         )
+        instructions.append(
+            "Place each selected element as its own distinct accessory or object. Do not merge, omit, abstract, or hide any selected element."
+        )
+        instructions.append(
+            "Keep every selected element fully visible inside the frame and away from the image borders."
+        )
         if len(selected_prompt_labels) == 1:
             instructions.append(
                 "Show the selected element clearly as a visible object."
             )
         elif len(selected_prompt_labels) <= 3:
             instructions.append(
-                "Show every selected element clearly, with each one individually recognizable."
+                "Show every selected element clearly, with each one individually recognizable and separated in the composition."
             )
         elif len(selected_prompt_labels) <= 8:
             instructions.append(
-                "Arrange the selected elements as a balanced collectible composition so each one remains individually visible."
+                "Arrange the selected elements as a balanced collectible composition using smaller accessory slots so each one remains individually visible."
             )
         else:
             instructions.append(
@@ -1320,14 +1487,14 @@ def _process_job(settings: Settings, job: Job):
             catalog_assets,
             catalog_prompt_payload,
         )
+        prompt_image_assets = _select_prompt_image_assets(
+            raw_prompt_template,
+            _extract_prompt_image_assets(cred_data),
+        )
         archetype_prompt = _prepare_generation_prompt(
             rendered_prompt,
             catalog_asset_appendix,
             enforce_photo_identity=bool(photo_path),
-        )
-        prompt_image_assets = _select_prompt_image_assets(
-            raw_prompt_template,
-            _extract_prompt_image_assets(cred_data),
         )
         if not archetype_prompt:
             prompt_source = "fixed_default"
@@ -1365,9 +1532,7 @@ def _process_job(settings: Settings, job: Job):
             ref_b64 = ""
             ref_mime = "image/jpeg"
             inline_images: list[dict[str, str]] = []
-            prompt_applied = archetype_prompt or build_editorial_prompt(
-                gender, hair_color
-            )
+            appearance_traits = _build_appearance_traits(gender, hair_color)
             if photo_path:
                 ref_bytes, ref_mime = _download_reference_image(settings, photo_path)
                 ref_b64 = base64.b64encode(ref_bytes).decode("ascii")
@@ -1399,6 +1564,21 @@ def _process_job(settings: Settings, job: Job):
                         "mime_type": asset_mime,
                     }
                 )
+            if photo_path and (
+                has_prompt_image_assets or has_catalog_prompt_assets
+            ) and ref_b64:
+                inline_images.append(
+                    {
+                        "data": ref_b64,
+                        "mime_type": ref_mime,
+                    }
+                )
+            prompt_applied = _prepare_generation_prompt(
+                rendered_prompt,
+                catalog_asset_appendix,
+                enforce_photo_identity=bool(photo_path),
+                appearance_traits=appearance_traits,
+            ) or build_editorial_prompt(gender, hair_color)
             if photo_path and (has_prompt_image_assets or has_catalog_prompt_assets):
                 generation_mode = "reference_photo_plus_prompt_assets"
             elif photo_path:
@@ -1430,6 +1610,9 @@ def _process_job(settings: Settings, job: Job):
                     "fixed_catalog_assets": fixed_catalog_labels,
                     "selected_catalog_assets": selected_catalog_labels,
                     "inline_image_count": len(inline_images),
+                    "identity_reference_image_count": 2
+                    if photo_path and (has_prompt_image_assets or has_catalog_prompt_assets)
+                    else (1 if photo_path else 0),
                     "prompt_source": prompt_source,
                     "prompt_preview": (prompt_applied or "")[:600],
                 },

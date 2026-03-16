@@ -34,6 +34,59 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         )
         self.assertIn("sole source of facial identity", prompt)
         self.assertIn("Do not invent a generic person", prompt)
+        self.assertIn("Do not add glasses", prompt)
+
+    def test_appearance_traits_are_injected_into_prompt(self) -> None:
+        """Include requested appearance traits without inferring from the photo."""
+        prompt = worker._prepare_generation_prompt(
+            "prompt base",
+            "",
+            enforce_photo_identity=True,
+            appearance_traits="woman, red hair",
+        )
+        self.assertIn("Requested appearance traits for the figure", prompt)
+        self.assertIn("red hair", prompt)
+
+    def test_white_box_asset_forces_vertical_structural_rules(self) -> None:
+        """Reinforce 9:16 white-box composition when the white box asset is present."""
+        appendix = worker._build_catalog_asset_prompt_appendix(
+            [
+                {
+                    "asset_key": "paredebranca",
+                    "label": "Parede branca",
+                    "required": "true",
+                    "storage_path": "x.png",
+                }
+            ],
+            {"paredebranca": "Parede branca"},
+        )
+        self.assertIn("exact structural container", appendix)
+        self.assertIn("vertical 9:16", appendix)
+        self.assertIn("fill the entire frame", appendix)
+        self.assertIn("Do not crop the participant", appendix)
+
+    def test_generation_inputs_resolve_aliases_for_gender_and_hair_color(self) -> None:
+        """Accept experience variable aliases when extracting canonical traits."""
+        gender, hair_color = worker._extract_generation_inputs(
+            {
+                "data_json": {
+                    "genero": "feminino",
+                    "cor_do_cabelo": "ruivo",
+                }
+            }
+        )
+        self.assertEqual(gender, "mulher")
+        self.assertEqual(hair_color, "ruivo")
+
+    def test_prepare_generation_prompt_dedupes_repeated_sentences(self) -> None:
+        """Collapse repeated prompt sentences to reduce conflicting redundancy."""
+        prompt = worker._prepare_generation_prompt(
+            "Keep the face. Keep the face.\nDo not crop. Do not crop.",
+            "",
+            enforce_photo_identity=False,
+        )
+        self.assertEqual(prompt.count("Keep the face."), 1)
+        self.assertEqual(prompt.count("Do not crop."), 1)
 
     def test_builder_prompt_is_used_without_dynamic_override(self) -> None:
         """Use the configured builder prompt even without extra credential fields."""
