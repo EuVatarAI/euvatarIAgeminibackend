@@ -1686,37 +1686,21 @@ def _process_job(settings: Settings, job: Job):
                 if not _is_retryable_gemini_error_message(last_err_str):
                     raise last_err
 
-                # Graceful fallback for transient provider outages: keep user flow alive
-                # with the captured photo (if present) or SVG card output.
-                if photo_path and ref_bytes:
-                    generated_bytes = ref_bytes
-                    generated_mime = ref_mime or "image/jpeg"
-                    _write_generation_log(
-                        settings,
-                        job.id,
-                        level="warning",
-                        event="gemini_fallback_reference_image",
-                        message="Gemini failed after retries; using reference photo fallback",
-                        payload={
-                            "error": last_err_str[:1000],
-                            "max_attempts": max_attempts,
-                            "mime_type": generated_mime,
-                        },
-                    )
-                else:
-                    generated_bytes = _build_svg_card(job, cred)
-                    generated_mime = "image/svg+xml"
-                    _write_generation_log(
-                        settings,
-                        job.id,
-                        level="warning",
-                        event="gemini_fallback_svg_on_retryable_error",
-                        message="Gemini failed after retries; using SVG fallback",
-                        payload={
-                            "error": last_err_str[:1000],
-                            "max_attempts": max_attempts,
-                        },
-                    )
+                _write_generation_log(
+                    settings,
+                    job.id,
+                    level="error",
+                    event="gemini_generation_failed_after_retries",
+                    message="Gemini failed after retries; no fallback output will be used",
+                    payload={
+                        "error": last_err_str[:2000],
+                        "max_attempts": max_attempts,
+                        "generation_mode": generation_mode,
+                        "has_photo_path": bool(photo_path),
+                        "inline_image_count": len(inline_images),
+                    },
+                )
+                raise RuntimeError(last_err_str)
 
             out_path = _upload_output(
                 settings,

@@ -15,6 +15,11 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertTrue(
             worker._is_retryable_gemini_error_message("gemini_no_image_in_response")
         )
+        self.assertTrue(
+            worker._is_retryable_gemini_error_message(
+                'gemini_no_image_in_response:{"candidate_count": 1}'
+            )
+        )
 
     def test_builder_prompt_is_always_used_for_generation(self) -> None:
         """Keep the generation prompt sourced from the configured builder prompt."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import requests
 
@@ -70,7 +71,10 @@ class GeminiImageClient:
                 break
 
         if not image_part:
-            raise RuntimeError("gemini_no_image_in_response")
+            raise RuntimeError(
+                "gemini_no_image_in_response:"
+                + self._summarize_missing_image_response(data)
+            )
 
         return {
             "model": self._model,
@@ -80,6 +84,36 @@ class GeminiImageClient:
             "image_bytes": base64.b64decode(image_part.get("data") or ""),
             "usage_metadata": data.get("usageMetadata") or data.get("usage_metadata"),
         }
+
+    def _summarize_missing_image_response(self, data: dict) -> str:
+        """Build a compact diagnostic summary when Gemini returns no image part."""
+        candidates = data.get("candidates", []) or []
+        prompt_feedback = data.get("promptFeedback") or data.get("prompt_feedback") or {}
+        finish_reasons: list[str] = []
+        text_parts: list[str] = []
+        for candidate in candidates[:3]:
+            finish_reason = str(
+                candidate.get("finishReason") or candidate.get("finish_reason") or ""
+            ).strip()
+            if finish_reason:
+                finish_reasons.append(finish_reason)
+            content = candidate.get("content") or {}
+            for part in content.get("parts", []) or []:
+                text = str(part.get("text") or "").strip()
+                if text:
+                    text_parts.append(text[:200])
+        summary = {
+            "candidate_count": len(candidates),
+            "finish_reasons": finish_reasons,
+            "prompt_block_reason": str(
+                prompt_feedback.get("blockReason")
+                or prompt_feedback.get("block_reason")
+                or ""
+            ).strip(),
+            "text_parts": text_parts[:3],
+            "usage_metadata": data.get("usageMetadata") or data.get("usage_metadata"),
+        }
+        return json.dumps(summary, ensure_ascii=True, sort_keys=True)[:1200]
 
     def generate_from_images_b64(
         self,
