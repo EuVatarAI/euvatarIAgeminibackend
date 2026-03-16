@@ -802,6 +802,29 @@ def _render_prompt_template(template: str, data: dict | None) -> str:
     return rendered
 
 
+def _strip_template_lines_with_keys(template: str, keys: list[str] | tuple[str, ...]) -> str:
+    """Remove template lines that reference placeholders for deferred generation data."""
+    if not template or not keys:
+        return str(template or "")
+    normalized_keys = {
+        _normalize_variable_key(str(key or "")) for key in keys if _normalize_variable_key(str(key or ""))
+    }
+    if not normalized_keys:
+        return str(template or "")
+    normalized_template = _normalize_template_placeholders(str(template or ""))
+    kept_lines: list[str] = []
+    for raw_line in normalized_template.splitlines():
+        line = str(raw_line or "")
+        referenced_keys = {
+            _normalize_variable_key(str(match.group(1) or ""))
+            for match in _VAR_TOKEN_RE.finditer(line)
+        }
+        if referenced_keys & normalized_keys:
+            continue
+        kept_lines.append(line)
+    return "\n".join(kept_lines)
+
+
 def _prepare_generation_prompt(
     base_prompt: str,
     appendix: str = "",
@@ -1151,6 +1174,38 @@ def _build_catalog_asset_prompt_appendix(
     return "\n".join(instructions)
 
 
+def _filter_generation_catalog_assets(
+    assets: list[dict[str, str]] | None,
+    prompt_payload: dict[str, object] | None,
+) -> tuple[list[dict[str, str]], dict[str, object], list[str]]:
+    """Keep only structural catalog assets for Gemini generation.
+
+    Returns generation assets, generation prompt payload, and deferred variable keys.
+    """
+    resolved_assets = assets if isinstance(assets, list) else []
+    resolved_payload = prompt_payload if isinstance(prompt_payload, dict) else {}
+
+    generation_assets = [
+        asset for asset in resolved_assets if _asset_matches_white_box_reference(asset)
+    ]
+    generation_asset_keys = {
+        _normalize_variable_key(str(asset.get("asset_key") or ""))
+        for asset in generation_assets
+    }
+
+    generation_payload: dict[str, object] = {}
+    deferred_variable_keys: list[str] = []
+    for key, value in resolved_payload.items():
+        normalized_key = _normalize_variable_key(str(key or ""))
+        if normalized_key in generation_asset_keys:
+            generation_payload[key] = value
+            continue
+        deferred_variable_keys.append(normalized_key)
+
+    deferred_variable_keys = list(dict.fromkeys([key for key in deferred_variable_keys if key]))
+    return generation_assets, generation_payload, deferred_variable_keys
+
+
 def _build_prompt_template_payload(data: dict | None) -> dict[str, object]:
     """Prepare credential payload data for prompt-template interpolation.
 
@@ -1411,6 +1466,10 @@ def _process_job(settings: Settings, job: Job):
             cred_data_for_log,
             catalog_prompt_assets,
         )
+        generation_catalog_assets, generation_catalog_prompt_payload, deferred_catalog_variable_keys = _filter_generation_catalog_assets(
+            catalog_assets,
+            catalog_prompt_payload,
+        )
         selected_catalog_labels: list[str] = []
         for value in catalog_prompt_payload.values():
             if isinstance(value, list):
@@ -1460,10 +1519,28 @@ def _process_job(settings: Settings, job: Job):
         cred_data = (
             cred.get("data_json") if isinstance(cred.get("data_json"), dict) else {}
         )
+        generation_catalog_labels = list(
+            dict.fromkeys(
+                [
+                    str(asset.get("label") or "").strip()
+                    for asset in generation_catalog_assets
+                    if str(asset.get("label") or "").strip()
+                ]
+            )
+        )
+        deferred_catalog_labels = list(
+            dict.fromkeys(
+                [
+                    label
+                    for label in selected_catalog_labels
+                    if label not in generation_catalog_labels
+                ]
+            )
+        )
         prompt_template_payload = _build_prompt_template_payload(
             {
                 **cred_data,
-                **catalog_prompt_payload,
+                **generation_catalog_prompt_payload,
             }
         )
         winner_archetype_id = str(
@@ -1480,15 +1557,19 @@ def _process_job(settings: Settings, job: Job):
             cred_data,
             archetype,
         )
+        generation_prompt_template = _strip_template_lines_with_keys(
+            raw_prompt_template,
+            deferred_catalog_variable_keys,
+        )
         rendered_prompt = _render_prompt_template(
-            raw_prompt_template, prompt_template_payload
+            generation_prompt_template, prompt_template_payload
         )
         catalog_asset_appendix = _build_catalog_asset_prompt_appendix(
-            catalog_assets,
-            catalog_prompt_payload,
+            generation_catalog_assets,
+            generation_catalog_prompt_payload,
         )
         prompt_image_assets = _select_prompt_image_assets(
-            raw_prompt_template,
+            generation_prompt_template,
             _extract_prompt_image_assets(cred_data),
         )
         archetype_prompt = _prepare_generation_prompt(
@@ -1507,7 +1588,7 @@ def _process_job(settings: Settings, job: Job):
             raise RuntimeError("missing_experience_gemini_key")
         use_photo_prompt = bool((archetype or {}).get("use_photo_prompt"))
         has_prompt_image_assets = bool(prompt_image_assets)
-        has_catalog_prompt_assets = bool(catalog_assets)
+        has_catalog_prompt_assets = bool(generation_catalog_assets)
         can_prompt_only = bool(
             effective_gemini_key
             and (not photo_path)
@@ -1553,7 +1634,7 @@ def _process_job(settings: Settings, job: Job):
                         "mime_type": asset_mime,
                     }
                 )
-            for asset in catalog_assets:
+            for asset in generation_catalog_assets:
                 asset_bytes, asset_mime = _download_reference_image(
                     settings,
                     str(asset.get("storage_path") or ""),
@@ -1609,6 +1690,8 @@ def _process_job(settings: Settings, job: Job):
                     ],
                     "fixed_catalog_assets": fixed_catalog_labels,
                     "selected_catalog_assets": selected_catalog_labels,
+                    "generation_catalog_assets": generation_catalog_labels,
+                    "deferred_catalog_assets": deferred_catalog_labels,
                     "inline_image_count": len(inline_images),
                     "identity_reference_image_count": 2
                     if photo_path and (has_prompt_image_assets or has_catalog_prompt_assets)

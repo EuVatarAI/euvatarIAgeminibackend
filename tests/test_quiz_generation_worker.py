@@ -93,6 +93,51 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertEqual(prompt.count("Keep the face."), 1)
         self.assertEqual(prompt.count("Do not crop."), 1)
 
+    def test_generation_catalog_assets_keep_only_white_box_reference(self) -> None:
+        """Only structural white-box assets should be sent to Gemini generation."""
+        assets, payload, deferred_keys = worker._filter_generation_catalog_assets(
+            [
+                {
+                    "asset_key": "paredebranca",
+                    "label": "Parede branca",
+                    "required": "false",
+                    "storage_path": "white.png",
+                },
+                {
+                    "asset_key": "gasometro",
+                    "label": "Gasometro",
+                    "required": "false",
+                    "storage_path": "gasometro.png",
+                },
+            ],
+            {
+                "paredebranca": "Parede branca",
+                "o_que_voce_mais_ama_em_porto_alegre": ["Gasometro"],
+            },
+        )
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(str(assets[0].get("asset_key")), "paredebranca")
+        self.assertEqual(payload, {"paredebranca": "Parede branca"})
+        self.assertEqual(
+            deferred_keys,
+            ["o_que_voce_mais_ama_em_porto_alegre"],
+        )
+
+    def test_template_lines_with_deferred_asset_keys_are_removed(self) -> None:
+        """Drop asset-specific template lines that should no longer reach Gemini."""
+        template = (
+            "Keep the face faithful.\n"
+            "Use {{o_que_voce_mais_ama_em_porto_alegre}} as accessories.\n"
+            "Show full body.\n"
+        )
+        stripped = worker._strip_template_lines_with_keys(
+            template,
+            ["o_que_voce_mais_ama_em_porto_alegre"],
+        )
+        self.assertIn("Keep the face faithful.", stripped)
+        self.assertIn("Show full body.", stripped)
+        self.assertNotIn("accessories", stripped)
+
     def test_builder_prompt_is_used_without_dynamic_override(self) -> None:
         """Use the configured builder prompt even without extra credential fields."""
         raw_prompt, prompt_source = worker._resolve_generation_prompt_template(
