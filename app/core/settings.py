@@ -18,6 +18,7 @@ class Settings:
     supabase_bucket: str
     gemini_api_key: str | None
     gemini_image_model: str
+    gemini_image_aspect_ratio: str
 
     @staticmethod
     def load() -> "Settings":
@@ -33,4 +34,5 @@ class Settings:
             supabase_bucket=config.supabase_bucket,
             gemini_api_key=config.gemini_api_key or None,
             gemini_image_model=config.gemini_image_model,
+            gemini_image_aspect_ratio=config.gemini_image_aspect_ratio,
         )
