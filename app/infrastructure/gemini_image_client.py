@@ -32,6 +32,9 @@ class GeminiImageClient:
         self._model = (
             self._settings.gemini_image_model or "gemini-2.5-flash-image"
         ).strip()
+        self._aspect_ratio = (
+            self._settings.gemini_image_aspect_ratio or "9:16"
+        ).strip()
         self._api_key = (self._settings.gemini_api_key or "").strip()
         self._url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -39,6 +42,13 @@ class GeminiImageClient:
         )
         self._session = requests.Session()
         self._session.headers.update({"Content-Type": "application/json"})
+
+    def _build_generation_config(self) -> dict[str, object]:
+        """Build the shared Gemini generation config for image output."""
+        config: dict[str, object] = {"response_modalities": ["IMAGE"]}
+        if self._aspect_ratio:
+            config["image_config"] = {"aspect_ratio": self._aspect_ratio}
+        return config
 
     def _request_generation(self, payload: dict) -> dict:
         """Send a generation payload to Gemini and extract the first image result.
@@ -144,7 +154,7 @@ class GeminiImageClient:
             )
         payload = {
             "contents": [{"parts": parts}],
-            "generation_config": {"response_modalities": ["IMAGE"]},
+            "generation_config": self._build_generation_config(),
         }
         return self._request_generation(payload)
 
@@ -185,6 +195,6 @@ class GeminiImageClient:
         """
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generation_config": {"response_modalities": ["IMAGE"]},
+            "generation_config": self._build_generation_config(),
         }
         return self._request_generation(payload)

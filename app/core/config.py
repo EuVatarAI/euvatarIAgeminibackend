@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     gemini_image_model: str = Field(
         default="gemini-2.5-flash-image", alias="GEMINI_IMAGE_MODEL"
     )
+    gemini_image_aspect_ratio: str = Field(
+        default="9:16", alias="GEMINI_IMAGE_ASPECT_RATIO"
+    )
 
     @property
     def cors_origins(self) -> list[str]:
