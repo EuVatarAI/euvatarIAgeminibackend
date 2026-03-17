@@ -40,6 +40,11 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertIn("sole source of facial identity", prompt)
         self.assertIn("Do not invent a generic person", prompt)
         self.assertIn("Do not add glasses", prompt)
+        self.assertIn("photorealistic and human", prompt)
+        self.assertIn("Do not create a caricature", prompt)
+        self.assertIn("Preserve the real facial proportions", prompt)
+        self.assertIn("Keep the head size", prompt)
+        self.assertIn("same smile shape and intensity", prompt)
 
     def test_appearance_traits_are_injected_into_prompt(self) -> None:
         """Include requested appearance traits without inferring from the photo."""

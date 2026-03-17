@@ -855,6 +855,21 @@ def _prepare_generation_prompt(
             "The final figure must look like the same real person from the uploaded photo, not an approximation."
         )
         sections.append(
+            "Keep the head, face, and expression photorealistic and human. Apply the collectible-toy treatment only as a subtle material finish, not as facial redesign."
+        )
+        sections.append(
+            "Do not create a caricature, doll face, cartoon face, oversized eyes, simplified nose, exaggerated jawline, exaggerated smile, or smoothed generic facial structure."
+        )
+        sections.append(
+            "Keep the head size, neck width, shoulders, arms, hands, torso, and legs in believable human proportion. Do not enlarge the head or shrink the body to create a toy-like caricature silhouette."
+        )
+        sections.append(
+            "Preserve the real facial proportions, eyelids, eye spacing, eyebrow shape, nose bridge, nostrils, lips, teeth visibility, cheek volume, jaw contour, and skin texture from the uploaded photo."
+        )
+        sections.append(
+            "If the participant is smiling in the photo, preserve the same smile shape and intensity. Do not broaden, simplify, or replace the smile with a generic doll expression."
+        )
+        sections.append(
             "Do not invent personal attributes that are not visible in the uploaded photo. Do not add glasses, hats, jewelry, facial hair, tattoos, or clothing details unless they are clearly present in the participant photo."
         )
     if appearance_traits.strip():
