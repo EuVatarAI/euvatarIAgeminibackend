@@ -1701,13 +1701,13 @@ def _validate_avatar_cutout_quality(cutout_bytes: bytes) -> tuple[bool, str]:
     bottom_nonzero_rows = row_widths[int(height * 0.94) :]
     if bottom_nonzero_rows:
         max_bottom_width = max(bottom_nonzero_rows)
-        if max_bottom_width > max(8, int(width * 0.24)):
+        if max_bottom_width > max(18, int(width * 0.36)):
             return False, "residual_floor_shadow"
 
     bottom_soft_rows = soft_row_widths[int(height * 0.94) :]
     if bottom_soft_rows:
         max_bottom_soft_width = max(bottom_soft_rows)
-        if max_bottom_soft_width > max(12, int(width * 0.28)):
+        if max_bottom_soft_width > max(26, int(width * 0.48)):
             return False, "residual_floor_shadow"
     return True, "ok"
 
