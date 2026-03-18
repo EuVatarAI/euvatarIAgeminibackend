@@ -14,6 +14,7 @@ class LeadConfigData(BaseModel):
     require_before_unlock: bool = Field(default=False)
     fields: list[dict[str, object]] = Field(default_factory=list)
     button_label: str | None = Field(default=None)
+    avatar_generation: dict[str, object] = Field(default_factory=dict)
 
 
 class CreateLeadRequest(BaseModel):

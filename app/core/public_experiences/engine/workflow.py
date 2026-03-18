@@ -100,6 +100,11 @@ class PublicExperiencesWorkflow:
             lead_enabled,
             len(lead_fields),
         )
+        avatar_generation = (
+            config.get("avatar_generation")
+            if isinstance(config.get("avatar_generation"), dict)
+            else {}
+        )
         return {
             "ok": True,
             "experience_id": experience_id,
@@ -107,6 +112,13 @@ class PublicExperiencesWorkflow:
                 "enabled": lead_enabled,
                 "gate_before_unlock": gate_before_unlock,
                 "fields": lead_fields,
+                "avatar_generation": {
+                    "enabled": bool(avatar_generation.get("enabled")),
+                    "background_mode": str(
+                        avatar_generation.get("background_mode")
+                        or "generated_scene"
+                    ).strip(),
+                },
             },
         }
 

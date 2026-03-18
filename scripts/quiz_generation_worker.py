@@ -11,6 +11,7 @@ import argparse
 import base64
 import datetime as dt
 import html
+import io
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import re
 import sys
 import time
 import unicodedata
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -34,7 +36,6 @@ from app.core.settings import Settings
 from app.application.services.image_prompt_builder import build_editorial_prompt
 from app.infrastructure.gemini_image_client import GeminiImageClient
 from app.infrastructure.supabase_rest import get_json, rest_headers
-
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,9 @@ def _write_generation_log(
             f"message={message}"
         )
 
-    logger.log(getattr(logging, str(level or "INFO").upper(), logging.INFO), log_message)
+    logger.log(
+        getattr(logging, str(level or "INFO").upper(), logging.INFO), log_message
+    )
 
     url = f"{settings.supabase_url}/rest/v1/generation_logs"
     body = [
@@ -243,6 +246,36 @@ def _load_experience_prompt_assets(
         if "supabase_experience_prompt_assets_404" in str(exc):
             return []
         raise
+
+
+def _load_experience_config(settings: Settings, experience_id: str) -> dict:
+    """Load the experience config JSON used to toggle generation behavior."""
+    rows = get_json(
+        settings,
+        "experiences",
+        "config_json",
+        {"id": f"eq.{experience_id}"},
+        limit=1,
+    )
+    if not rows:
+        return {}
+    config_json = rows[0].get("config_json")
+    return config_json if isinstance(config_json, dict) else {}
+
+
+def _avatar_cutout_enabled(config_json: dict | None) -> bool:
+    """Return whether the experience requests cutout-based avatar generation."""
+    config = config_json if isinstance(config_json, dict) else {}
+    avatar_generation = (
+        config.get("avatar_generation")
+        if isinstance(config.get("avatar_generation"), dict)
+        else {}
+    )
+    return (
+        bool(avatar_generation.get("enabled"))
+        and str(avatar_generation.get("background_mode") or "").strip()
+        == "builder_fixed_png"
+    )
 
 
 def _ext_from_mime(mime: str) -> str:
@@ -605,6 +638,18 @@ def _gemini_max_attempts() -> int:
         return 3
 
 
+def _avatar_cutout_max_attempts() -> int:
+    """Return the stricter retry budget used for avatar cutout generations.
+
+    Returns:
+        int: Maximum number of attempts allowed for avatar-only cutout mode.
+    """
+    try:
+        return max(1, int(os.getenv("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", "7")))
+    except Exception:
+        return 7
+
+
 def _gemini_retry_base_delay_seconds() -> float:
     """Return the configured base delay used for Gemini retry backoff.
 
@@ -632,6 +677,8 @@ def _is_retryable_gemini_error_message(message: str) -> bool:
     if "gemini_no_image_in_response" in text:
         return True
     if "gemini_empty_image" in text:
+        return True
+    if "avatar_cutout_quality_failed" in text:
         return True
     if "gemini_http_429" in text:
         return True
@@ -802,12 +849,16 @@ def _render_prompt_template(template: str, data: dict | None) -> str:
     return rendered
 
 
-def _strip_template_lines_with_keys(template: str, keys: list[str] | tuple[str, ...]) -> str:
+def _strip_template_lines_with_keys(
+    template: str, keys: list[str] | tuple[str, ...]
+) -> str:
     """Remove template lines that reference placeholders for deferred generation data."""
     if not template or not keys:
         return str(template or "")
     normalized_keys = {
-        _normalize_variable_key(str(key or "")) for key in keys if _normalize_variable_key(str(key or ""))
+        _normalize_variable_key(str(key or ""))
+        for key in keys
+        if _normalize_variable_key(str(key or ""))
     }
     if not normalized_keys:
         return str(template or "")
@@ -890,6 +941,31 @@ def _prepare_generation_prompt(
             sections.append(text)
 
     return " ".join(section for section in sections if section).strip()
+
+
+def _build_avatar_cutout_prompt_appendix() -> str:
+    """Build strict instructions for the avatar-only cutout generation mode."""
+    instructions = [
+        "Generate only one full-body collectible figure avatar of the participant.",
+        "Use a plain solid neutral background with smooth even lighting and no visible scene elements.",
+        "The background must be a single clean studio backdrop designed for easy background removal, preferably a uniform light gray, light beige, or off-white color with no gradient, texture, or vignette.",
+        "Do not generate any packaging, box, frame, pedestal, floor props, scenery, furniture, text, logos, accessories, or decorative objects.",
+        "Keep the composition vertical 9:16 with the avatar standing upright and centered.",
+        "Show the full body from head to toe and keep the complete silhouette fully visible inside the frame.",
+        "Let the avatar occupy most of the image height while leaving a small clean margin around the silhouette.",
+        "Keep the head size in realistic proportion to the torso, shoulders, hips, arms, and legs. Do not generate an oversized head or miniaturized body.",
+        "Keep clear negative space around the head, arms, hands, torso, legs, feet, and between both legs so the full silhouette is easy to isolate.",
+        "Generate both full feet completely, including ankles, heels, soles, toes, or shoes when present. Do not crop, hide, merge, blur, or distort the feet.",
+        "Do not let the feet blend into the background or into any floor shadow. The bottom contour of each foot must be fully visible and clean.",
+        "Do not add floor shadow, cast shadow, glow, smoke, reflections, fog, background blur bands, or any dark contact shadow touching the feet or legs.",
+        "Do not generate any gray patch, gray band, background leak, washed-out area, or background-colored artifact on the hair, forehead, face, ears, or neck.",
+        "The head, hairline, forehead, and face must be clean, fully rendered, and completely free of background-colored contamination.",
+        "Do not generate gray seams, gray smudges, washed-out patches, cracks, straps, or background-colored artifacts on the shoulders, armpits, chest, torso, or biceps.",
+        "The shoulders, chest, torso, arms, and underarm transitions must be fully rendered and free of gray contamination or cutout residue.",
+        "Keep the outline of the hair, shoulders, elbows, hands, legs, ankles, and feet crisp and completely separated from the background.",
+        "Preserve realistic human proportions while keeping the collectible-figure material finish subtle and premium.",
+    ]
+    return "\n".join(instructions)
 
 
 def _dedupe_prompt_sentences(text: str) -> str:
@@ -1145,9 +1221,7 @@ def _build_catalog_asset_prompt_appendix(
         )
     if fixed_labels:
         instructions.append(
-            "Required fixed scene references: "
-            + ", ".join(fixed_prompt_labels)
-            + "."
+            "Required fixed scene references: " + ", ".join(fixed_prompt_labels) + "."
         )
     if selected_labels:
         instructions.append(
@@ -1217,7 +1291,9 @@ def _filter_generation_catalog_assets(
             continue
         deferred_variable_keys.append(normalized_key)
 
-    deferred_variable_keys = list(dict.fromkeys([key for key in deferred_variable_keys if key]))
+    deferred_variable_keys = list(
+        dict.fromkeys([key for key in deferred_variable_keys if key])
+    )
     return generation_assets, generation_payload, deferred_variable_keys
 
 
@@ -1363,7 +1439,475 @@ def _upload_output(
     return path
 
 
-def _finish_job_done(settings: Settings, job: Job, duration_ms: int, output_path: str):
+def _upload_cutout(
+    settings: Settings,
+    experience_id: str,
+    generation_id: str,
+    data: bytes,
+) -> str:
+    """Upload the transparent avatar cutout as a PNG asset."""
+    bucket = settings.supabase_bucket
+    path = f"quiz/{experience_id}/cutouts/{generation_id}.png"
+    url = f"{settings.supabase_url}/storage/v1/object/{bucket}/{path}"
+    r = requests.post(
+        url,
+        headers={
+            **rest_headers(settings),
+            "x-upsert": "true",
+            "Content-Type": "image/png",
+        },
+        data=data,
+        timeout=30,
+    )
+    if not r.ok:
+        raise RuntimeError(f"cutout_upload_failed:{r.status_code}:{r.text[:160]}")
+    return path
+
+
+def _color_distance(rgb_a: tuple[int, int, int], rgb_b: tuple[int, int, int]) -> float:
+    """Return Euclidean distance between two RGB colors."""
+    return (
+        (rgb_a[0] - rgb_b[0]) ** 2
+        + (rgb_a[1] - rgb_b[1]) ** 2
+        + (rgb_a[2] - rgb_b[2]) ** 2
+    ) ** 0.5
+
+
+def _keep_largest_alpha_component(alpha_image, *, threshold: int = 48):
+    """Keep only the largest connected alpha component in a mask image."""
+    width, height = alpha_image.size
+    pixels = alpha_image.load()
+    visited = [[False for _ in range(width)] for _ in range(height)]
+    largest_component: set[tuple[int, int]] = set()
+
+    for y in range(height):
+        for x in range(width):
+            if visited[y][x] or pixels[x, y] < threshold:
+                visited[y][x] = True
+                continue
+            queue = [(x, y)]
+            component: list[tuple[int, int]] = []
+            visited[y][x] = True
+            head = 0
+            while head < len(queue):
+                current_x, current_y = queue[head]
+                head += 1
+                component.append((current_x, current_y))
+                for next_x, next_y in (
+                    (current_x - 1, current_y),
+                    (current_x + 1, current_y),
+                    (current_x, current_y - 1),
+                    (current_x, current_y + 1),
+                ):
+                    if (
+                        next_x < 0
+                        or next_x >= width
+                        or next_y < 0
+                        or next_y >= height
+                        or visited[next_y][next_x]
+                    ):
+                        continue
+                    visited[next_y][next_x] = True
+                    if pixels[next_x, next_y] >= threshold:
+                        queue.append((next_x, next_y))
+            if len(component) > len(largest_component):
+                largest_component = set(component)
+
+    if not largest_component:
+        return alpha_image
+
+    cleaned = alpha_image.copy()
+    cleaned_pixels = cleaned.load()
+    for y in range(height):
+        for x in range(width):
+            if (x, y) not in largest_component:
+                cleaned_pixels[x, y] = 0
+    return cleaned
+
+
+def _validate_avatar_cutout_quality(cutout_bytes: bytes) -> tuple[bool, str]:
+    """Validate whether the generated cutout keeps the lower body intact."""
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("avatar_cutout_dependency_missing:Pillow") from exc
+
+    image = Image.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+    width, height = image.size
+    if width < 16 or height < 16:
+        return False, "image_too_small"
+
+    pixels = image.load()
+    alpha = image.getchannel("A")
+    alpha_pixels = alpha.load()
+    row_widths: list[int] = []
+    soft_row_widths: list[int] = []
+    for y in range(height):
+        visible = 0
+        soft_visible = 0
+        for x in range(width):
+            pixel_alpha = alpha_pixels[x, y]
+            if pixel_alpha >= 160:
+                visible += 1
+            if pixel_alpha >= 48:
+                soft_visible += 1
+        row_widths.append(visible)
+        soft_row_widths.append(soft_visible)
+
+    lower_band_start = int(height * 0.90)
+    leg_band_start = int(height * 0.72)
+    leg_band_end = int(height * 0.86)
+    lower_rows = row_widths[lower_band_start:]
+    leg_rows = row_widths[leg_band_start:leg_band_end]
+    if not lower_rows or not leg_rows:
+        return False, "missing_lower_band"
+
+    lower_avg = sum(lower_rows) / len(lower_rows)
+    leg_avg = sum(leg_rows) / len(leg_rows)
+    if leg_avg <= 0:
+        return False, "missing_legs"
+    if lower_avg / leg_avg < 0.22:
+        return False, "incomplete_feet"
+
+    bbox = alpha.getbbox()
+    if bbox:
+
+        def largest_suspicious_component(
+            start_x: int,
+            end_x: int,
+            start_y: int,
+            end_y: int,
+        ) -> int:
+            if start_x >= end_x or start_y >= end_y:
+                return 0
+            visited: set[tuple[int, int]] = set()
+            largest = 0
+            for region_y in range(start_y, end_y):
+                for region_x in range(start_x, end_x):
+                    if (region_x, region_y) in visited:
+                        continue
+                    pixel_alpha = alpha_pixels[region_x, region_y]
+                    if pixel_alpha < 180:
+                        continue
+                    if (
+                        _color_distance(
+                            tuple(pixels[region_x, region_y][:3]), background_rgb
+                        )
+                        > 52.0
+                    ):
+                        continue
+                    queue: deque[tuple[int, int]] = deque([(region_x, region_y)])
+                    visited.add((region_x, region_y))
+                    component_size = 0
+                    while queue:
+                        current_x, current_y = queue.popleft()
+                        component_size += 1
+                        for step_x, step_y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                            next_x = current_x + step_x
+                            next_y = current_y + step_y
+                            if (
+                                next_x < start_x
+                                or next_x >= end_x
+                                or next_y < start_y
+                                or next_y >= end_y
+                                or (next_x, next_y) in visited
+                            ):
+                                continue
+                            next_alpha = alpha_pixels[next_x, next_y]
+                            if next_alpha < 180:
+                                continue
+                            if (
+                                _color_distance(
+                                    tuple(pixels[next_x, next_y][:3]),
+                                    background_rgb,
+                                )
+                                > 52.0
+                            ):
+                                continue
+                            visited.add((next_x, next_y))
+                            queue.append((next_x, next_y))
+                    largest = max(largest, component_size)
+            return largest
+
+        edge_samples: list[tuple[int, int, int]] = []
+        for x in range(width):
+            for y in (0, height - 1):
+                if alpha_pixels[x, y] < 24:
+                    edge_samples.append(tuple(pixels[x, y][:3]))
+        for y in range(height):
+            for x in (0, width - 1):
+                if alpha_pixels[x, y] < 24:
+                    edge_samples.append(tuple(pixels[x, y][:3]))
+        if edge_samples:
+            sample_count = len(edge_samples)
+            background_rgb = tuple(
+                int(sum(sample[channel] for sample in edge_samples) / sample_count)
+                for channel in range(3)
+            )
+            left, upper, right, lower = bbox
+            bbox_width = max(1, right - left)
+            bbox_height = max(1, lower - upper)
+            head_top = upper
+            head_bottom = min(lower, upper + max(24, int(bbox_height * 0.24)))
+            head_left = left + int(bbox_width * 0.14)
+            head_right = right - int(bbox_width * 0.14)
+            suspicious_pixels = 0
+            for y in range(head_top, head_bottom):
+                for x in range(head_left, head_right):
+                    if alpha_pixels[x, y] < 180:
+                        continue
+                    if _color_distance(tuple(pixels[x, y][:3]), background_rgb) <= 42.0:
+                        suspicious_pixels += 1
+            head_region_area = max(
+                1, (head_bottom - head_top) * max(1, head_right - head_left)
+            )
+            if suspicious_pixels / head_region_area > 0.012:
+                return False, "head_background_artifact"
+            head_component = largest_suspicious_component(
+                head_left,
+                head_right,
+                head_top,
+                head_bottom,
+            )
+            if head_component > max(10, int(head_region_area * 0.0025)):
+                return False, "head_background_artifact"
+
+            torso_top = upper + int(bbox_height * 0.22)
+            torso_bottom = min(lower, upper + int(bbox_height * 0.58))
+            torso_left = left + int(bbox_width * 0.12)
+            torso_right = right - int(bbox_width * 0.12)
+            torso_suspicious_pixels = 0
+            for y in range(torso_top, torso_bottom):
+                for x in range(torso_left, torso_right):
+                    if alpha_pixels[x, y] < 180:
+                        continue
+                    if _color_distance(tuple(pixels[x, y][:3]), background_rgb) <= 42.0:
+                        torso_suspicious_pixels += 1
+            torso_region_area = max(
+                1, (torso_bottom - torso_top) * max(1, torso_right - torso_left)
+            )
+            if torso_suspicious_pixels / torso_region_area > 0.008:
+                return False, "torso_background_artifact"
+            torso_component = largest_suspicious_component(
+                torso_left,
+                torso_right,
+                torso_top,
+                torso_bottom,
+            )
+            if torso_component > max(16, int(torso_region_area * 0.002)):
+                return False, "torso_background_artifact"
+
+    # Reject residual floor shadows/halos that remain visible below the feet.
+    bottom_nonzero_rows = row_widths[int(height * 0.94) :]
+    if bottom_nonzero_rows:
+        max_bottom_width = max(bottom_nonzero_rows)
+        if max_bottom_width > max(8, int(width * 0.24)):
+            return False, "residual_floor_shadow"
+
+    bottom_soft_rows = soft_row_widths[int(height * 0.94) :]
+    if bottom_soft_rows:
+        max_bottom_soft_width = max(bottom_soft_rows)
+        if max_bottom_soft_width > max(12, int(width * 0.28)):
+            return False, "residual_floor_shadow"
+    return True, "ok"
+
+
+def _decontaminate_rgba_pixel(
+    rgba: tuple[int, int, int, int],
+    background_rgb: tuple[int, int, int],
+) -> tuple[int, int, int, int]:
+    """Remove background color contamination from a semi-transparent edge pixel."""
+    red, green, blue, alpha = rgba
+    if alpha <= 0 or alpha >= 255:
+        return rgba
+    alpha_ratio = alpha / 255.0
+    restored_channels: list[int] = []
+    for channel_value, background_value in zip(
+        (red, green, blue), background_rgb, strict=True
+    ):
+        restored = (channel_value - background_value * (1.0 - alpha_ratio)) / max(
+            0.01, alpha_ratio
+        )
+        restored_channels.append(max(0, min(255, int(round(restored)))))
+    return restored_channels[0], restored_channels[1], restored_channels[2], alpha
+
+
+def _build_avatar_cutout_png(image_bytes: bytes) -> bytes:
+    """Remove a neutral edge background and return a transparent PNG cutout."""
+    try:
+        from PIL import Image, ImageFilter
+    except ImportError as exc:  # pragma: no cover - exercised only without dependency
+        raise RuntimeError("avatar_cutout_dependency_missing:Pillow") from exc
+
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    width, height = image.size
+    pixels = image.load()
+
+    if width < 8 or height < 8:
+        raise RuntimeError("avatar_cutout_image_too_small")
+
+    step_x = max(1, width // 24)
+    step_y = max(1, height // 24)
+    edge_samples: list[tuple[int, int, int]] = []
+    for x in range(0, width, step_x):
+        edge_samples.append(tuple(pixels[x, 0][:3]))
+        edge_samples.append(tuple(pixels[x, height - 1][:3]))
+    for y in range(0, height, step_y):
+        edge_samples.append(tuple(pixels[0, y][:3]))
+        edge_samples.append(tuple(pixels[width - 1, y][:3]))
+
+    sample_count = max(1, len(edge_samples))
+    background_rgb = tuple(
+        int(sum(sample[channel] for sample in edge_samples) / sample_count)
+        for channel in range(3)
+    )
+    edge_distances = [
+        _color_distance(sample, background_rgb) for sample in edge_samples
+    ]
+    avg_edge_distance = sum(edge_distances) / max(1, len(edge_distances))
+    background_threshold = max(26.0, min(60.0, avg_edge_distance + 18.0))
+    soft_threshold = background_threshold + 16.0
+
+    background_mask = [[False for _ in range(width)] for _ in range(height)]
+    queue: list[tuple[int, int]] = []
+    for x in range(width):
+        queue.append((x, 0))
+        queue.append((x, height - 1))
+    for y in range(height):
+        queue.append((0, y))
+        queue.append((width - 1, y))
+
+    head = 0
+    while head < len(queue):
+        x, y = queue[head]
+        head += 1
+        if background_mask[y][x]:
+            continue
+        rgba = pixels[x, y]
+        if rgba[3] <= 8:
+            background_mask[y][x] = True
+        else:
+            distance = _color_distance(tuple(rgba[:3]), background_rgb)
+            if distance > background_threshold:
+                continue
+            background_mask[y][x] = True
+        if x > 0:
+            queue.append((x - 1, y))
+        if x + 1 < width:
+            queue.append((x + 1, y))
+        if y > 0:
+            queue.append((x, y - 1))
+        if y + 1 < height:
+            queue.append((x, y + 1))
+
+    result = image.copy()
+    result_pixels = result.load()
+    for y in range(height):
+        for x in range(width):
+            rgba = result_pixels[x, y]
+            if background_mask[y][x]:
+                result_pixels[x, y] = (rgba[0], rgba[1], rgba[2], 0)
+                continue
+            distance = _color_distance(tuple(rgba[:3]), background_rgb)
+            if distance < soft_threshold:
+                alpha_ratio = max(
+                    0.0,
+                    min(
+                        1.0,
+                        (distance - background_threshold)
+                        / max(1.0, soft_threshold - background_threshold),
+                    ),
+                )
+                softened_alpha = int(rgba[3] * alpha_ratio)
+                result_pixels[x, y] = (rgba[0], rgba[1], rgba[2], softened_alpha)
+
+    alpha = result.getchannel("A")
+    alpha = alpha.filter(ImageFilter.MinFilter(3))
+    alpha = alpha.point(
+        lambda value: 0 if value < 22 else (255 if value > 244 else int(value))
+    )
+    alpha = _keep_largest_alpha_component(alpha, threshold=52)
+    alpha = alpha.filter(ImageFilter.MaxFilter(3))
+    alpha = alpha.point(
+        lambda value: 0 if value < 18 else (255 if value > 245 else int(value))
+    )
+    result.putalpha(alpha)
+    strong_alpha = alpha.point(lambda value: 255 if value >= 210 else 0)
+    strong_bbox = strong_alpha.getbbox()
+    if strong_bbox:
+        alpha_pixels = alpha.load()
+        result_pixels = result.load()
+        shadow_distance_threshold = soft_threshold + 10.0
+        strong_alpha_pixels = strong_alpha.load()
+        column_bottoms: list[int] = []
+        for x in range(width):
+            bottom_y = -1
+            for y in range(height - 1, -1, -1):
+                if strong_alpha_pixels[x, y] >= 210:
+                    bottom_y = y
+                    break
+            column_bottoms.append(bottom_y)
+
+        for x, bottom_y in enumerate(column_bottoms):
+            if bottom_y < 0:
+                continue
+            for y in range(bottom_y, height):
+                current_alpha = alpha_pixels[x, y]
+                rgba = result_pixels[x, y]
+                distance = _color_distance(tuple(rgba[:3]), background_rgb)
+                if y >= bottom_y + 2:
+                    alpha_pixels[x, y] = 0
+                    continue
+                if y == bottom_y + 1 and (
+                    current_alpha < 240 or distance <= shadow_distance_threshold + 14.0
+                ):
+                    alpha_pixels[x, y] = 0
+                    continue
+                if y == bottom_y and (
+                    current_alpha < 252 and distance <= shadow_distance_threshold + 8.0
+                ):
+                    alpha_pixels[x, y] = 0
+                    continue
+                if y > bottom_y + 1 and distance <= shadow_distance_threshold:
+                    alpha_pixels[x, y] = 0
+                    continue
+                if current_alpha >= 180 and distance > shadow_distance_threshold:
+                    continue
+                if distance <= shadow_distance_threshold and current_alpha <= 245:
+                    alpha_pixels[x, y] = 0
+        result.putalpha(alpha)
+    result_pixels = result.load()
+    for y in range(height):
+        for x in range(width):
+            rgba = result_pixels[x, y]
+            if 0 < rgba[3] < 255:
+                result_pixels[x, y] = _decontaminate_rgba_pixel(
+                    rgba,
+                    background_rgb,
+                )
+    alpha = result.getchannel("A")
+    bbox = alpha.getbbox()
+    if bbox:
+        padding = max(8, int(max(width, height) * 0.02))
+        left = max(0, bbox[0] - padding)
+        upper = max(0, bbox[1] - padding)
+        right = min(width, bbox[2] + padding)
+        lower = min(height, bbox[3] + padding)
+        result = result.crop((left, upper, right, lower))
+
+    output = io.BytesIO()
+    result.save(output, format="PNG")
+    return output.getvalue()
+
+
+def _finish_job_done(
+    settings: Settings,
+    job: Job,
+    duration_ms: int,
+    output_path: str,
+    *,
+    cutout_path: str | None = None,
+):
     """Mark a generation row as done and persist output metadata.
 
     Args:
@@ -1383,6 +1927,9 @@ def _finish_job_done(settings: Settings, job: Job, duration_ms: int, output_path
         "error_message": None,
         "updated_at": _now_iso(),
     }
+    if cutout_path:
+        body_with_cost["cutout_path"] = cutout_path
+        body_with_cost["cutout_url"] = None
     r = requests.patch(
         url,
         headers={**rest_headers(settings), "Content-Type": "application/json"},
@@ -1400,10 +1947,29 @@ def _finish_job_done(settings: Settings, job: Job, duration_ms: int, output_path
         "error_message": None,
         "updated_at": _now_iso(),
     }
-    requests.patch(
+    if cutout_path:
+        body_legacy["cutout_path"] = cutout_path
+        body_legacy["cutout_url"] = None
+    r_legacy = requests.patch(
         url,
         headers={**rest_headers(settings), "Content-Type": "application/json"},
         json=body_legacy,
+        timeout=20,
+    )
+    if r_legacy.ok or not cutout_path:
+        return
+    body_output_only = {
+        "status": "done",
+        "duration_ms": duration_ms,
+        "output_path": output_path,
+        "output_url": None,
+        "error_message": None,
+        "updated_at": _now_iso(),
+    }
+    requests.patch(
+        url,
+        headers={**rest_headers(settings), "Content-Type": "application/json"},
+        json=body_output_only,
         timeout=20,
     )
 
@@ -1470,6 +2036,8 @@ def _process_job(settings: Settings, job: Job):
     )
     try:
         cred = _load_credential_data(settings, job.credential_id)
+        experience_config = _load_experience_config(settings, job.experience_id)
+        avatar_cutout_mode = _avatar_cutout_enabled(experience_config)
         gender, hair_color = _extract_generation_inputs(cred)
         cred_data_for_log = (
             cred.get("data_json") if isinstance(cred.get("data_json"), dict) else {}
@@ -1481,10 +2049,27 @@ def _process_job(settings: Settings, job: Job):
             cred_data_for_log,
             catalog_prompt_assets,
         )
-        generation_catalog_assets, generation_catalog_prompt_payload, deferred_catalog_variable_keys = _filter_generation_catalog_assets(
-            catalog_assets,
-            catalog_prompt_payload,
-        )
+        if avatar_cutout_mode:
+            generation_catalog_assets = []
+            generation_catalog_prompt_payload = {}
+            deferred_catalog_variable_keys = list(
+                dict.fromkeys(
+                    [
+                        _normalize_variable_key(str(key or ""))
+                        for key in catalog_prompt_payload.keys()
+                        if _normalize_variable_key(str(key or ""))
+                    ]
+                )
+            )
+        else:
+            (
+                generation_catalog_assets,
+                generation_catalog_prompt_payload,
+                deferred_catalog_variable_keys,
+            ) = _filter_generation_catalog_assets(
+                catalog_assets,
+                catalog_prompt_payload,
+            )
         selected_catalog_labels: list[str] = []
         for value in catalog_prompt_payload.values():
             if isinstance(value, list):
@@ -1522,6 +2107,7 @@ def _process_job(settings: Settings, job: Job):
                 "catalog_prompt_assets": len(catalog_assets),
                 "fixed_catalog_assets": fixed_catalog_labels,
                 "selected_catalog_assets": selected_catalog_labels,
+                "avatar_cutout_mode": avatar_cutout_mode,
                 "gender": gender,
                 "hair_color": hair_color,
                 "winner_archetype_id": str(
@@ -1579,9 +2165,13 @@ def _process_job(settings: Settings, job: Job):
         rendered_prompt = _render_prompt_template(
             generation_prompt_template, prompt_template_payload
         )
-        catalog_asset_appendix = _build_catalog_asset_prompt_appendix(
-            generation_catalog_assets,
-            generation_catalog_prompt_payload,
+        catalog_asset_appendix = (
+            _build_avatar_cutout_prompt_appendix()
+            if avatar_cutout_mode
+            else _build_catalog_asset_prompt_appendix(
+                generation_catalog_assets,
+                generation_catalog_prompt_payload,
+            )
         )
         prompt_image_assets = _select_prompt_image_assets(
             generation_prompt_template,
@@ -1614,6 +2204,7 @@ def _process_job(settings: Settings, job: Job):
                 or has_catalog_prompt_assets
             )
         )
+        cutout_path = ""
         if effective_gemini_key and (
             photo_path
             or has_prompt_image_assets
@@ -1623,6 +2214,8 @@ def _process_job(settings: Settings, job: Job):
             gemini_settings = replace(settings, gemini_api_key=effective_gemini_key)
             gemini = GeminiImageClient(gemini_settings)
             max_attempts = _gemini_max_attempts()
+            if avatar_cutout_mode:
+                max_attempts = max(max_attempts, _avatar_cutout_max_attempts())
             retry_base_delay = _gemini_retry_base_delay_seconds()
             ref_bytes = b""
             ref_b64 = ""
@@ -1660,9 +2253,11 @@ def _process_job(settings: Settings, job: Job):
                         "mime_type": asset_mime,
                     }
                 )
-            if photo_path and (
-                has_prompt_image_assets or has_catalog_prompt_assets
-            ) and ref_b64:
+            if (
+                photo_path
+                and (has_prompt_image_assets or has_catalog_prompt_assets)
+                and ref_b64
+            ):
                 inline_images.append(
                     {
                         "data": ref_b64,
@@ -1683,12 +2278,16 @@ def _process_job(settings: Settings, job: Job):
                 generation_mode = "prompt_assets_only"
             else:
                 generation_mode = "prompt_only"
+            if avatar_cutout_mode:
+                generation_mode = f"{generation_mode}_avatar_cutout"
 
             generated_bytes = b""
             generated_mime = "image/png"
+            cutout_bytes = b""
             model_name = None
             latency_ms = None
             last_err = None
+            generation_succeeded = False
             _write_generation_log(
                 settings,
                 job.id,
@@ -1707,10 +2306,15 @@ def _process_job(settings: Settings, job: Job):
                     "selected_catalog_assets": selected_catalog_labels,
                     "generation_catalog_assets": generation_catalog_labels,
                     "deferred_catalog_assets": deferred_catalog_labels,
+                    "avatar_cutout_mode": avatar_cutout_mode,
+                    "max_attempts": max_attempts,
                     "inline_image_count": len(inline_images),
-                    "identity_reference_image_count": 2
-                    if photo_path and (has_prompt_image_assets or has_catalog_prompt_assets)
-                    else (1 if photo_path else 0),
+                    "identity_reference_image_count": (
+                        2
+                        if photo_path
+                        and (has_prompt_image_assets or has_catalog_prompt_assets)
+                        else (1 if photo_path else 0)
+                    ),
                     "prompt_source": prompt_source,
                     "prompt_preview": (prompt_applied or "")[:600],
                 },
@@ -1718,26 +2322,52 @@ def _process_job(settings: Settings, job: Job):
 
             for attempt in range(1, max_attempts + 1):
                 try:
+                    candidate_generated_bytes = b""
+                    candidate_generated_mime = "image/png"
+                    candidate_cutout_bytes = b""
+                    candidate_model_name = None
+                    candidate_latency_ms = None
                     if inline_images:
                         t_gem = time.time()
                         raw = gemini.generate_from_images_b64(
                             prompt=prompt_applied,
                             images=inline_images,
                         )
-                        latency_ms = int((time.time() - t_gem) * 1000)
-                        generated_bytes = raw.get("image_bytes") or b""
-                        generated_mime = str(raw.get("mime_type") or "image/png")
-                        model_name = raw.get("model")
+                        candidate_latency_ms = int((time.time() - t_gem) * 1000)
+                        candidate_generated_bytes = raw.get("image_bytes") or b""
+                        candidate_generated_mime = str(
+                            raw.get("mime_type") or "image/png"
+                        )
+                        candidate_model_name = raw.get("model")
                     else:
                         t_gem = time.time()
                         raw = gemini.generate_from_prompt(prompt_applied)
-                        latency_ms = int((time.time() - t_gem) * 1000)
-                        generated_bytes = raw.get("image_bytes") or b""
-                        generated_mime = str(raw.get("mime_type") or "image/png")
-                        model_name = raw.get("model")
+                        candidate_latency_ms = int((time.time() - t_gem) * 1000)
+                        candidate_generated_bytes = raw.get("image_bytes") or b""
+                        candidate_generated_mime = str(
+                            raw.get("mime_type") or "image/png"
+                        )
+                        candidate_model_name = raw.get("model")
 
-                    if not generated_bytes:
+                    if not candidate_generated_bytes:
                         raise RuntimeError("gemini_empty_image")
+                    if avatar_cutout_mode:
+                        candidate_cutout_bytes = _build_avatar_cutout_png(
+                            candidate_generated_bytes
+                        )
+                        is_valid_cutout, cutout_reason = (
+                            _validate_avatar_cutout_quality(candidate_cutout_bytes)
+                        )
+                        if not is_valid_cutout:
+                            raise RuntimeError(
+                                f"avatar_cutout_quality_failed:{cutout_reason}"
+                            )
+                    generated_bytes = candidate_generated_bytes
+                    generated_mime = candidate_generated_mime
+                    cutout_bytes = candidate_cutout_bytes
+                    model_name = candidate_model_name
+                    latency_ms = candidate_latency_ms
+                    generation_succeeded = True
 
                     if attempt > 1:
                         _write_generation_log(
@@ -1751,6 +2381,8 @@ def _process_job(settings: Settings, job: Job):
                     break
                 except Exception as exc:
                     last_err = exc
+                    generated_bytes = b""
+                    cutout_bytes = b""
                     err_str = str(exc)
                     is_retryable = _is_retryable_gemini_error_message(err_str)
                     should_retry = _should_retry_gemini_error_message(
@@ -1779,11 +2411,14 @@ def _process_job(settings: Settings, job: Job):
                     sleep_s = retry_base_delay * (2 ** (attempt - 1))
                     time.sleep(sleep_s)
 
-            if last_err is not None and not generated_bytes:
-                last_err_str = str(last_err)
+            if not generation_succeeded:
+                last_err_str = str(last_err or "gemini_generation_failed")
                 if not _is_retryable_gemini_error_message(last_err_str):
-                    raise last_err
+                    raise (
+                        last_err if last_err is not None else RuntimeError(last_err_str)
+                    )
 
+                last_err_str = str(last_err)
                 _write_generation_log(
                     settings,
                     job.id,
@@ -1807,6 +2442,34 @@ def _process_job(settings: Settings, job: Job):
                 generated_bytes,
                 mime_type=generated_mime,
             )
+            if avatar_cutout_mode:
+                try:
+                    cutout_path = _upload_cutout(
+                        settings,
+                        job.experience_id,
+                        job.id,
+                        cutout_bytes,
+                    )
+                    _write_generation_log(
+                        settings,
+                        job.id,
+                        level="info",
+                        event="cutout_generated",
+                        message="Avatar cutout generated and uploaded",
+                        payload={
+                            "cutout_path": cutout_path,
+                            "cutout_bytes": len(cutout_bytes),
+                        },
+                    )
+                except Exception as exc:
+                    _write_generation_log(
+                        settings,
+                        job.id,
+                        level="warning",
+                        event="cutout_generation_failed",
+                        message="Avatar cutout generation failed; keeping original output",
+                        payload={"error": str(exc)[:1000]},
+                    )
             _write_generation_log(
                 settings,
                 job.id,
@@ -1823,6 +2486,7 @@ def _process_job(settings: Settings, job: Job):
                     "archetype_id": (archetype or {}).get("id"),
                     "archetype_name": (archetype or {}).get("name"),
                     "generation_mode": generation_mode,
+                    "avatar_cutout_mode": avatar_cutout_mode,
                     "use_photo_prompt": use_photo_prompt,
                     "has_photo_path": bool(photo_path),
                     "gemini_key_source": "experience",
@@ -1849,6 +2513,7 @@ def _process_job(settings: Settings, job: Job):
                     "has_photo_path": bool(photo_path),
                     "use_photo_prompt": bool((archetype or {}).get("use_photo_prompt")),
                     "has_archetype_prompt": bool(archetype_prompt),
+                    "avatar_cutout_mode": avatar_cutout_mode,
                     "output_path": out_path,
                 },
             )
@@ -1858,10 +2523,16 @@ def _process_job(settings: Settings, job: Job):
             level="info",
             event="output_uploaded",
             message="Output uploaded to storage",
-            payload={"output_path": out_path},
+            payload={"output_path": out_path, "cutout_path": cutout_path or None},
         )
         dur = int((time.time() - t0) * 1000)
-        _finish_job_done(settings, job, dur, out_path)
+        _finish_job_done(
+            settings,
+            job,
+            dur,
+            out_path,
+            cutout_path=cutout_path or None,
+        )
         _write_generation_log(
             settings,
             job.id,
@@ -1946,7 +2617,9 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=getattr(logging, os.getenv("QUIZ_WORKER_LOG_LEVEL", "INFO").upper(), logging.INFO),
+        level=getattr(
+            logging, os.getenv("QUIZ_WORKER_LOG_LEVEL", "INFO").upper(), logging.INFO
+        ),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         force=True,
     )

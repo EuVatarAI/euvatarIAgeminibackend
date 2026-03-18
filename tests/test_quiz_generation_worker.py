@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts import quiz_generation_worker as worker
 
@@ -18,6 +21,11 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertTrue(
             worker._is_retryable_gemini_error_message(
                 'gemini_no_image_in_response:{"candidate_count": 1}'
+            )
+        )
+        self.assertTrue(
+            worker._is_retryable_gemini_error_message(
+                "avatar_cutout_quality_failed:incomplete_feet"
             )
         )
 
@@ -174,6 +182,213 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertTrue(
             worker._is_retryable_gemini_error_message("gemini_no_image_in_response")
         )
+
+    def test_avatar_cutout_flag_requires_enabled_builder_background_mode(self) -> None:
+        """Enable cutout mode only for the explicit builder-fixed background config."""
+        self.assertTrue(
+            worker._avatar_cutout_enabled(
+                {
+                    "avatar_generation": {
+                        "enabled": True,
+                        "background_mode": "builder_fixed_png",
+                    }
+                }
+            )
+        )
+        self.assertFalse(
+            worker._avatar_cutout_enabled(
+                {
+                    "avatar_generation": {
+                        "enabled": True,
+                        "background_mode": "generated_scene",
+                    }
+                }
+            )
+        )
+
+    def test_avatar_cutout_max_attempts_uses_stricter_default(self) -> None:
+        """Use a higher retry budget for avatar cutout mode in production."""
+        original = os.environ.get("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS")
+        try:
+            os.environ.pop("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", None)
+            self.assertEqual(worker._avatar_cutout_max_attempts(), 7)
+        finally:
+            if original is None:
+                os.environ.pop("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", None)
+            else:
+                os.environ["QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS"] = original
+
+    def test_avatar_cutout_prompt_appendix_forbids_scene_elements(self) -> None:
+        """Avatar cutout mode should request only the isolated figure on neutral background."""
+        appendix = worker._build_avatar_cutout_prompt_appendix()
+        self.assertIn("plain solid neutral background", appendix)
+        self.assertIn("Do not generate any packaging", appendix)
+        self.assertIn("full body from head to toe", appendix)
+        self.assertIn("vertical 9:16", appendix)
+        self.assertIn("Do not add floor shadow", appendix)
+        self.assertIn("Generate both full feet completely", appendix)
+        self.assertIn("gray patch", appendix)
+        self.assertIn("gray seams", appendix)
+
+    def test_finish_job_done_persists_cutout_path_when_supported(self) -> None:
+        """Persist cutout metadata when the database accepts the new columns."""
+        settings = SimpleNamespace(
+            supabase_url="https://example.supabase.co",
+            supabase_service_role="service-role",
+        )
+        job = worker.Job(
+            id="gen-1",
+            experience_id="exp-1",
+            credential_id="cred-1",
+            kind="quiz_result",
+        )
+
+        with patch("scripts.quiz_generation_worker.requests.patch") as patch_request:
+            patch_request.return_value = SimpleNamespace(ok=True)
+
+            worker._finish_job_done(
+                settings,  # type: ignore[arg-type]
+                job,
+                1234,
+                "quiz/exp-1/generations/gen-1.png",
+                cutout_path="quiz/exp-1/cutouts/gen-1.png",
+            )
+
+        self.assertEqual(patch_request.call_count, 1)
+        self.assertEqual(
+            patch_request.call_args.kwargs["json"]["cutout_path"],
+            "quiz/exp-1/cutouts/gen-1.png",
+        )
+
+    def test_keep_largest_alpha_component_removes_small_residue(self) -> None:
+        """Keep the main silhouette while dropping tiny detached alpha islands."""
+        from PIL import Image
+
+        alpha = Image.new("L", (6, 6), 0)
+        pixels = alpha.load()
+        for y in range(1, 5):
+            for x in range(1, 3):
+                pixels[x, y] = 255
+        pixels[5, 5] = 255
+
+        cleaned = worker._keep_largest_alpha_component(alpha, threshold=52)
+        cleaned_pixels = cleaned.load()
+
+        self.assertEqual(cleaned_pixels[5, 5], 0)
+        self.assertEqual(cleaned_pixels[1, 1], 255)
+
+    def test_validate_avatar_cutout_quality_detects_incomplete_feet(self) -> None:
+        """Reject cutouts whose lower band collapses too much versus the leg band."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (100, 200), (0, 0, 0, 0))
+        pixels = image.load()
+        for y in range(20, 160):
+            for x in range(30, 70):
+                pixels[x, y] = (255, 255, 255, 255)
+        for y in range(160, 190):
+            for x in range(44, 56):
+                pixels[x, y] = (255, 255, 255, 255)
+
+        import io
+
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        is_valid, reason = worker._validate_avatar_cutout_quality(output.getvalue())
+
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, "incomplete_feet")
+
+    def test_validate_avatar_cutout_quality_detects_residual_floor_shadow(self) -> None:
+        """Reject cutouts that still keep a wide visible band below the feet."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (100, 200), (0, 0, 0, 0))
+        pixels = image.load()
+        for y in range(20, 188):
+            for x in range(34, 66):
+                pixels[x, y] = (255, 255, 255, 255)
+        for y in range(188, 192):
+            for x in range(30, 70):
+                pixels[x, y] = (255, 255, 255, 255)
+        for y in range(192, 197):
+            for x in range(18, 82):
+                pixels[x, y] = (220, 220, 220, 96)
+
+        import io
+
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        is_valid, reason = worker._validate_avatar_cutout_quality(output.getvalue())
+
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, "residual_floor_shadow")
+
+    def test_validate_avatar_cutout_quality_detects_head_background_artifact(
+        self,
+    ) -> None:
+        """Reject cutouts with a background-colored opaque patch inside the head area."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (100, 200), (232, 232, 232, 0))
+        pixels = image.load()
+        for y in range(20, 188):
+            for x in range(30, 70):
+                pixels[x, y] = (255, 220, 190, 255)
+        for y in range(188, 192):
+            for x in range(34, 66):
+                pixels[x, y] = (255, 220, 190, 255)
+        for y in range(22, 42):
+            for x in range(38, 55):
+                pixels[x, y] = (232, 232, 232, 255)
+
+        import io
+
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        is_valid, reason = worker._validate_avatar_cutout_quality(output.getvalue())
+
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, "head_background_artifact")
+
+    def test_validate_avatar_cutout_quality_detects_torso_background_artifact(
+        self,
+    ) -> None:
+        """Reject cutouts with a background-colored opaque patch inside the torso area."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (120, 220), (232, 232, 232, 0))
+        pixels = image.load()
+        for y in range(20, 208):
+            for x in range(34, 86):
+                pixels[x, y] = (210, 150, 96, 255)
+        for y in range(208, 212):
+            for x in range(40, 80):
+                pixels[x, y] = (210, 150, 96, 255)
+        for y in range(78, 118):
+            for x in range(42, 82):
+                pixels[x, y] = (232, 232, 232, 255)
+
+        import io
+
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        is_valid, reason = worker._validate_avatar_cutout_quality(output.getvalue())
+
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, "torso_background_artifact")
+
+    def test_decontaminate_rgba_pixel_removes_background_tint(self) -> None:
+        """Recover a semi-transparent edge pixel from the sampled background tint."""
+        restored = worker._decontaminate_rgba_pixel(
+            (180, 180, 180, 128),
+            (240, 240, 240),
+        )
+
+        self.assertEqual(restored[3], 128)
+        self.assertLess(restored[0], 180)
+        self.assertLess(restored[1], 180)
+        self.assertLess(restored[2], 180)
 
 
 if __name__ == "__main__":

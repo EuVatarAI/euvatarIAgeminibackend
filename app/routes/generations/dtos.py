@@ -27,6 +27,7 @@ class GenerationStatusData(BaseModel):
     id: str
     status: str
     output_url: str | None = None
+    cutout_url: str | None = None
     final_card_url: str | None = None
     error_message: str | None = None
 

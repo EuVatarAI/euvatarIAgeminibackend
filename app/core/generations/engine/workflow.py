@@ -119,7 +119,7 @@ class GenerationsWorkflow:
                 rows = get_json(
                     self.settings,
                     "generations",
-                    "id,status,output_path,output_url,final_card_path,final_card_url,error_message,duration_ms",
+                    "id,status,output_path,output_url,cutout_path,cutout_url,final_card_path,final_card_url,error_message,duration_ms",
                     {"id": f"eq.{clean_generation_id}"},
                     limit=1,
                 )
@@ -153,6 +153,9 @@ class GenerationsWorkflow:
         output_url = row.get("output_url")
         if row.get("status") == "done" and not output_url and row.get("output_path"):
             output_url = self._build_signed_download_url(str(row.get("output_path")))
+        cutout_url = row.get("cutout_url")
+        if row.get("status") == "done" and not cutout_url and row.get("cutout_path"):
+            cutout_url = self._build_signed_download_url(str(row.get("cutout_path")))
         final_card_url = row.get("final_card_url")
         if (
             row.get("status") == "done"
@@ -169,6 +172,7 @@ class GenerationsWorkflow:
             "status": row.get("status"),
             "duration_ms": row.get("duration_ms"),
             "output_url": output_url,
+            "cutout_url": cutout_url,
             "final_card_url": final_card_url,
             "error_message": row.get("error_message"),
         }
