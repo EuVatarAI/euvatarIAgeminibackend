@@ -968,6 +968,33 @@ def _build_avatar_cutout_prompt_appendix() -> str:
     return "\n".join(instructions)
 
 
+def _build_avatar_cutout_recovery_prompt(
+    *,
+    enforce_photo_identity: bool,
+    appearance_traits: str = "",
+) -> str:
+    """Return a shorter fallback prompt for avatar cutout recovery retries.
+
+    This prompt is intentionally compact so the worker can fall back to it when
+    Gemini repeatedly responds without an image (`IMAGE_OTHER` / no image
+    payload) for the richer builder prompt.
+    """
+    base_prompt = (
+        "Create a vertical 9:16 full-body collectible figure avatar of the participant "
+        "on a plain solid neutral background. Show the full body from head to toe, "
+        "standing upright and centered, with both full feet clearly visible. Keep "
+        "realistic human proportions and a subtle premium collectible-figure material "
+        "finish. Use a clean plain studio background with no gradient, no floor "
+        "shadow, no props, no accessories, no packaging, and no text."
+    )
+    return _prepare_generation_prompt(
+        base_prompt,
+        "",
+        enforce_photo_identity=enforce_photo_identity,
+        appearance_traits=appearance_traits,
+    )
+
+
 def _dedupe_prompt_sentences(text: str) -> str:
     """Remove repeated prompt sentences while preserving the original order."""
     parts = re.split(r"(?<=[.!?])\s+|\n+", str(text or "").strip())
@@ -2270,6 +2297,14 @@ def _process_job(settings: Settings, job: Job):
                 enforce_photo_identity=bool(photo_path),
                 appearance_traits=appearance_traits,
             ) or build_editorial_prompt(gender, hair_color)
+            recovery_prompt_applied = (
+                _build_avatar_cutout_recovery_prompt(
+                    enforce_photo_identity=bool(photo_path),
+                    appearance_traits=appearance_traits,
+                )
+                if avatar_cutout_mode
+                else ""
+            )
             if photo_path and (has_prompt_image_assets or has_catalog_prompt_assets):
                 generation_mode = "reference_photo_plus_prompt_assets"
             elif photo_path:
@@ -2288,6 +2323,8 @@ def _process_job(settings: Settings, job: Job):
             latency_ms = None
             last_err = None
             generation_succeeded = False
+            no_image_retry_count = 0
+            using_recovery_prompt = False
             _write_generation_log(
                 settings,
                 job.id,
@@ -2327,10 +2364,31 @@ def _process_job(settings: Settings, job: Job):
                     candidate_cutout_bytes = b""
                     candidate_model_name = None
                     candidate_latency_ms = None
+                    attempt_prompt = prompt_applied
+                    if (
+                        avatar_cutout_mode
+                        and no_image_retry_count > 0
+                        and recovery_prompt_applied
+                    ):
+                        attempt_prompt = recovery_prompt_applied
+                        if not using_recovery_prompt:
+                            using_recovery_prompt = True
+                            _write_generation_log(
+                                settings,
+                                job.id,
+                                level="info",
+                                event="gemini_prompt_recovery_activated",
+                                message="Switched avatar cutout generation to the recovery prompt after no-image response",
+                                payload={
+                                    "attempt": attempt,
+                                    "max_attempts": max_attempts,
+                                    "no_image_retry_count": no_image_retry_count,
+                                },
+                            )
                     if inline_images:
                         t_gem = time.time()
                         raw = gemini.generate_from_images_b64(
-                            prompt=prompt_applied,
+                            prompt=attempt_prompt,
                             images=inline_images,
                         )
                         candidate_latency_ms = int((time.time() - t_gem) * 1000)
@@ -2341,7 +2399,7 @@ def _process_job(settings: Settings, job: Job):
                         candidate_model_name = raw.get("model")
                     else:
                         t_gem = time.time()
-                        raw = gemini.generate_from_prompt(prompt_applied)
+                        raw = gemini.generate_from_prompt(attempt_prompt)
                         candidate_latency_ms = int((time.time() - t_gem) * 1000)
                         candidate_generated_bytes = raw.get("image_bytes") or b""
                         candidate_generated_mime = str(
@@ -2384,6 +2442,8 @@ def _process_job(settings: Settings, job: Job):
                     generated_bytes = b""
                     cutout_bytes = b""
                     err_str = str(exc)
+                    if "gemini_no_image_in_response" in err_str.lower():
+                        no_image_retry_count += 1
                     is_retryable = _is_retryable_gemini_error_message(err_str)
                     should_retry = _should_retry_gemini_error_message(
                         err_str,

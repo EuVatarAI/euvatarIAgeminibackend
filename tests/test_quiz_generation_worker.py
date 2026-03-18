@@ -230,6 +230,19 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertIn("gray patch", appendix)
         self.assertIn("gray seams", appendix)
 
+    def test_avatar_cutout_recovery_prompt_is_short_and_canonical(self) -> None:
+        """Fallback prompt should stay compact for no-image Gemini recoveries."""
+        prompt = worker._build_avatar_cutout_recovery_prompt(
+            enforce_photo_identity=True,
+            appearance_traits="woman, blonde hair",
+        )
+        self.assertIn("vertical 9:16 full-body collectible figure avatar", prompt)
+        self.assertIn("plain solid neutral background", prompt)
+        self.assertIn("both full feet clearly visible", prompt)
+        self.assertIn("no floor shadow", prompt)
+        self.assertIn("no props, no accessories, no packaging, and no text", prompt)
+        self.assertIn("woman, blonde hair", prompt)
+
     def test_finish_job_done_persists_cutout_path_when_supported(self) -> None:
         """Persist cutout metadata when the database accepts the new columns."""
         settings = SimpleNamespace(
