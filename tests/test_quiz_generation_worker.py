@@ -329,6 +329,35 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertFalse(is_valid)
         self.assertEqual(reason, "incomplete_feet")
 
+    def test_validate_avatar_cutout_quality_detects_weak_foot_support(self) -> None:
+        """Reject silhouettes that end in tiny foot points instead of full feet."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (120, 240), (0, 0, 0, 0))
+        pixels = image.load()
+        for y in range(20, 190):
+            for x in range(38, 82):
+                pixels[x, y] = (255, 255, 255, 255)
+        for y in range(190, 214):
+            for x in range(46, 58):
+                pixels[x, y] = (255, 255, 255, 255)
+            for x in range(62, 74):
+                pixels[x, y] = (255, 255, 255, 255)
+        for y in range(214, 232):
+            for x in range(50, 53):
+                pixels[x, y] = (255, 255, 255, 255)
+            for x in range(67, 70):
+                pixels[x, y] = (255, 255, 255, 255)
+
+        import io
+
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        is_valid, reason = worker._validate_avatar_cutout_quality(output.getvalue())
+
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, "incomplete_feet")
+
     def test_validate_avatar_cutout_quality_detects_head_background_artifact(
         self,
     ) -> None:
@@ -469,6 +498,40 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
             (0, max(0, cutout.height - 12), cutout.width, cutout.height)
         )
         self.assertGreater(max(lower_band.getdata()), 0)
+
+    def test_build_avatar_cutout_png_prunes_small_gray_sole_blob(self) -> None:
+        """Remove small gray blobs attached to the sole without erasing the shoe."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (140, 240), (240, 240, 240, 255))
+        pixels = image.load()
+        for y in range(20, 190):
+            for x in range(46, 94):
+                pixels[x, y] = (180, 120, 90, 255)
+        for y in range(190, 222):
+            for x in range(54, 70):
+                pixels[x, y] = (32, 32, 32, 255)
+            for x in range(74, 90):
+                pixels[x, y] = (32, 32, 32, 255)
+        for y in range(220, 224):
+            for x in range(60, 66):
+                pixels[x, y] = (205, 205, 205, 255)
+
+        import io
+
+        source = io.BytesIO()
+        image.save(source, format="PNG")
+        cutout_bytes = worker._build_avatar_cutout_png(source.getvalue())
+        cutout = Image.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+        alpha = cutout.getchannel("A")
+        bottom_blob_band = alpha.crop(
+            (0, cutout.height - 5, cutout.width, cutout.height - 1)
+        )
+        self.assertEqual(max(bottom_blob_band.getdata()), 0)
+        lower_shoe_band = alpha.crop(
+            (0, max(0, cutout.height - 14), cutout.width, cutout.height - 6)
+        )
+        self.assertGreater(max(lower_shoe_band.getdata()), 0)
 
 
 if __name__ == "__main__":

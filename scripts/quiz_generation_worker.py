@@ -1614,6 +1614,58 @@ def _validate_avatar_cutout_quality(cutout_bytes: bytes) -> tuple[bool, str]:
 
     bbox = alpha.getbbox()
     if bbox:
+        left, upper, right, lower = bbox
+        bbox_width = max(1, right - left)
+        bbox_height = max(1, lower - upper)
+
+        lower_support_start = max(int(height * 0.87), upper + int(bbox_height * 0.80))
+        lower_support_end = min(height, lower + 1)
+        support_columns: list[int] = []
+        support_pixels = 0
+        for x in range(left, right):
+            visible_in_band = 0
+            for y in range(lower_support_start, lower_support_end):
+                if alpha_pixels[x, y] >= 160:
+                    visible_in_band += 1
+                    support_pixels += 1
+            if visible_in_band >= 2:
+                support_columns.append(x)
+
+        support_clusters: list[tuple[int, int, int]] = []
+        if support_columns:
+            cluster_start = support_columns[0]
+            cluster_prev = support_columns[0]
+            for x in support_columns[1:]:
+                if x == cluster_prev + 1:
+                    cluster_prev = x
+                    continue
+                support_clusters.append(
+                    (cluster_start, cluster_prev, cluster_prev - cluster_start + 1)
+                )
+                cluster_start = x
+                cluster_prev = x
+            support_clusters.append(
+                (cluster_start, cluster_prev, cluster_prev - cluster_start + 1)
+            )
+
+        min_cluster_width = max(4, int(bbox_width * 0.05))
+        strong_clusters = [
+            cluster for cluster in support_clusters if cluster[2] >= min_cluster_width
+        ]
+        if len(strong_clusters) == 0:
+            return False, "incomplete_feet"
+        if len(strong_clusters) == 1:
+            single_cluster_width = strong_clusters[0][2]
+            if single_cluster_width < max(12, int(bbox_width * 0.18)):
+                return False, "incomplete_feet"
+            if support_pixels < max(72, int(bbox_width * 0.55)):
+                return False, "incomplete_feet"
+        elif len(strong_clusters) >= 2:
+            strongest_two = sorted(
+                (cluster[2] for cluster in strong_clusters), reverse=True
+            )[:2]
+            if min(strongest_two) < max(5, int(bbox_width * 0.045)):
+                return False, "incomplete_feet"
 
         def largest_suspicious_component(
             start_x: int,
@@ -1687,9 +1739,6 @@ def _validate_avatar_cutout_quality(cutout_bytes: bytes) -> tuple[bool, str]:
                 int(sum(sample[channel] for sample in edge_samples) / sample_count)
                 for channel in range(3)
             )
-            left, upper, right, lower = bbox
-            bbox_width = max(1, right - left)
-            bbox_height = max(1, lower - upper)
             head_top = upper
             head_bottom = min(lower, upper + max(24, int(bbox_height * 0.24)))
             head_left = left + int(bbox_width * 0.14)
@@ -1925,6 +1974,71 @@ def _build_avatar_cutout_png(image_bytes: bytes) -> bytes:
                     distance <= shadow_distance_threshold + 10.0 and current_alpha < 245
                 ):
                     alpha_pixels[x, y] = 0
+
+        left, upper, right, lower = strong_bbox
+        band_start = max(int(height * 0.84), upper + int((lower - upper) * 0.78))
+        background_luminance = sum(background_rgb) / 3.0
+        visited: set[tuple[int, int]] = set()
+        max_component_size = max(32, int(width * 0.06))
+        max_component_height = max(4, int(height * 0.018))
+
+        def is_foot_residue(x: int, y: int) -> bool:
+            current_alpha = alpha_pixels[x, y]
+            if current_alpha <= 0:
+                return False
+            bottom_y = column_bottoms[x]
+            if bottom_y < 0 or y < max(band_start, bottom_y - 1):
+                return False
+            rgba = result_pixels[x, y]
+            distance = _color_distance(tuple(rgba[:3]), background_rgb)
+            if distance > shadow_distance_threshold + 10.0:
+                return False
+            channel_range = max(rgba[:3]) - min(rgba[:3])
+            pixel_luminance = sum(rgba[:3]) / 3.0
+            return (
+                channel_range <= 34 and pixel_luminance >= background_luminance - 85.0
+            )
+
+        for y in range(band_start, height):
+            for x in range(left, right):
+                if (x, y) in visited or not is_foot_residue(x, y):
+                    continue
+                queue: deque[tuple[int, int]] = deque([(x, y)])
+                visited.add((x, y))
+                component: list[tuple[int, int]] = []
+                min_y = y
+                max_y = y
+                near_sole_pixels = 0
+                while queue:
+                    current_x, current_y = queue.popleft()
+                    component.append((current_x, current_y))
+                    min_y = min(min_y, current_y)
+                    max_y = max(max_y, current_y)
+                    if current_y >= column_bottoms[current_x] - 1:
+                        near_sole_pixels += 1
+                    for step_x, step_y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        next_x = current_x + step_x
+                        next_y = current_y + step_y
+                        if (
+                            next_x < left
+                            or next_x >= right
+                            or next_y < band_start
+                            or next_y >= height
+                            or (next_x, next_y) in visited
+                        ):
+                            continue
+                        visited.add((next_x, next_y))
+                        if not is_foot_residue(next_x, next_y):
+                            continue
+                        queue.append((next_x, next_y))
+                component_height = max_y - min_y + 1
+                if (
+                    len(component) <= max_component_size
+                    and component_height <= max_component_height
+                    and near_sole_pixels >= max(1, len(component) // 2)
+                ):
+                    for component_x, component_y in component:
+                        alpha_pixels[component_x, component_y] = 0
         result.putalpha(alpha)
     result_pixels = result.load()
     for y in range(height):
