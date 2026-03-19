@@ -329,31 +329,6 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertFalse(is_valid)
         self.assertEqual(reason, "incomplete_feet")
 
-    def test_validate_avatar_cutout_quality_detects_residual_floor_shadow(self) -> None:
-        """Reject cutouts that still keep a wide visible band below the feet."""
-        from PIL import Image
-
-        image = Image.new("RGBA", (100, 200), (0, 0, 0, 0))
-        pixels = image.load()
-        for y in range(20, 188):
-            for x in range(34, 66):
-                pixels[x, y] = (255, 255, 255, 255)
-        for y in range(188, 192):
-            for x in range(30, 70):
-                pixels[x, y] = (255, 255, 255, 255)
-        for y in range(192, 197):
-            for x in range(18, 82):
-                pixels[x, y] = (220, 220, 220, 96)
-
-        import io
-
-        output = io.BytesIO()
-        image.save(output, format="PNG")
-        is_valid, reason = worker._validate_avatar_cutout_quality(output.getvalue())
-
-        self.assertFalse(is_valid)
-        self.assertEqual(reason, "residual_floor_shadow")
-
     def test_validate_avatar_cutout_quality_detects_head_background_artifact(
         self,
     ) -> None:

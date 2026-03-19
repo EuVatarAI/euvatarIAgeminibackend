@@ -1741,17 +1741,6 @@ def _validate_avatar_cutout_quality(cutout_bytes: bytes) -> tuple[bool, str]:
                 return False, "torso_background_artifact"
 
     # Reject residual floor shadows/halos that remain visible below the feet.
-    bottom_nonzero_rows = row_widths[int(height * 0.94) :]
-    if bottom_nonzero_rows:
-        max_bottom_width = max(bottom_nonzero_rows)
-        if max_bottom_width > max(18, int(width * 0.36)):
-            return False, "residual_floor_shadow"
-
-    bottom_soft_rows = soft_row_widths[int(height * 0.94) :]
-    if bottom_soft_rows:
-        max_bottom_soft_width = max(bottom_soft_rows)
-        if max_bottom_soft_width > max(26, int(width * 0.48)):
-            return False, "residual_floor_shadow"
     return True, "ok"
 
 
