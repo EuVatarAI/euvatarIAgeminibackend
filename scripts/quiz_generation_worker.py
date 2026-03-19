@@ -645,9 +645,25 @@ def _avatar_cutout_max_attempts() -> int:
         int: Maximum number of attempts allowed for avatar-only cutout mode.
     """
     try:
-        return max(1, int(os.getenv("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", "7")))
+        return max(1, int(os.getenv("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", "4")))
     except Exception:
-        return 7
+        return 4
+
+
+def _avatar_cutout_retry_base_delay_seconds() -> float:
+    """Return the faster retry delay used for avatar cutout generations."""
+    try:
+        return max(
+            0.1,
+            float(
+                os.getenv(
+                    "QUIZ_GEMINI_AVATAR_CUTOUT_RETRY_BASE_DELAY_SECONDS",
+                    "0.35",
+                )
+            ),
+        )
+    except Exception:
+        return 0.35
 
 
 def _gemini_retry_base_delay_seconds() -> float:
@@ -2241,9 +2257,13 @@ def _process_job(settings: Settings, job: Job):
             gemini_settings = replace(settings, gemini_api_key=effective_gemini_key)
             gemini = GeminiImageClient(gemini_settings)
             max_attempts = _gemini_max_attempts()
+            retry_base_delay = _gemini_retry_base_delay_seconds()
             if avatar_cutout_mode:
                 max_attempts = max(max_attempts, _avatar_cutout_max_attempts())
-            retry_base_delay = _gemini_retry_base_delay_seconds()
+                retry_base_delay = min(
+                    retry_base_delay,
+                    _avatar_cutout_retry_base_delay_seconds(),
+                )
             ref_bytes = b""
             ref_b64 = ""
             ref_mime = "image/jpeg"
@@ -2323,7 +2343,7 @@ def _process_job(settings: Settings, job: Job):
             latency_ms = None
             last_err = None
             generation_succeeded = False
-            no_image_retry_count = 0
+            retryable_avatar_cutout_failures = 0
             using_recovery_prompt = False
             _write_generation_log(
                 settings,
@@ -2367,7 +2387,7 @@ def _process_job(settings: Settings, job: Job):
                     attempt_prompt = prompt_applied
                     if (
                         avatar_cutout_mode
-                        and no_image_retry_count > 0
+                        and retryable_avatar_cutout_failures > 0
                         and recovery_prompt_applied
                     ):
                         attempt_prompt = recovery_prompt_applied
@@ -2378,11 +2398,11 @@ def _process_job(settings: Settings, job: Job):
                                 job.id,
                                 level="info",
                                 event="gemini_prompt_recovery_activated",
-                                message="Switched avatar cutout generation to the recovery prompt after no-image response",
+                                message="Switched avatar cutout generation to the recovery prompt after the first retryable failure",
                                 payload={
                                     "attempt": attempt,
                                     "max_attempts": max_attempts,
-                                    "no_image_retry_count": no_image_retry_count,
+                                    "retryable_avatar_cutout_failures": retryable_avatar_cutout_failures,
                                 },
                             )
                     if inline_images:
@@ -2442,9 +2462,9 @@ def _process_job(settings: Settings, job: Job):
                     generated_bytes = b""
                     cutout_bytes = b""
                     err_str = str(exc)
-                    if "gemini_no_image_in_response" in err_str.lower():
-                        no_image_retry_count += 1
                     is_retryable = _is_retryable_gemini_error_message(err_str)
+                    if avatar_cutout_mode and is_retryable:
+                        retryable_avatar_cutout_failures += 1
                     should_retry = _should_retry_gemini_error_message(
                         err_str,
                         attempt=attempt,

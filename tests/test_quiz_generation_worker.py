@@ -211,12 +211,29 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         original = os.environ.get("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS")
         try:
             os.environ.pop("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", None)
-            self.assertEqual(worker._avatar_cutout_max_attempts(), 7)
+            self.assertEqual(worker._avatar_cutout_max_attempts(), 4)
         finally:
             if original is None:
                 os.environ.pop("QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS", None)
             else:
                 os.environ["QUIZ_GEMINI_AVATAR_CUTOUT_MAX_ATTEMPTS"] = original
+
+    def test_avatar_cutout_retry_base_delay_uses_faster_default(self) -> None:
+        """Use a shorter retry delay budget for avatar cutout mode."""
+        original = os.environ.get("QUIZ_GEMINI_AVATAR_CUTOUT_RETRY_BASE_DELAY_SECONDS")
+        try:
+            os.environ.pop("QUIZ_GEMINI_AVATAR_CUTOUT_RETRY_BASE_DELAY_SECONDS", None)
+            self.assertEqual(worker._avatar_cutout_retry_base_delay_seconds(), 0.35)
+        finally:
+            if original is None:
+                os.environ.pop(
+                    "QUIZ_GEMINI_AVATAR_CUTOUT_RETRY_BASE_DELAY_SECONDS",
+                    None,
+                )
+            else:
+                os.environ["QUIZ_GEMINI_AVATAR_CUTOUT_RETRY_BASE_DELAY_SECONDS"] = (
+                    original
+                )
 
     def test_avatar_cutout_prompt_appendix_forbids_scene_elements(self) -> None:
         """Avatar cutout mode should request only the isolated figure on neutral background."""
