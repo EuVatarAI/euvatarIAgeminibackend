@@ -1913,7 +1913,17 @@ def _build_avatar_cutout_png(image_bytes: bytes) -> bytes:
                     continue
                 rgba = result_pixels[x, y]
                 distance = _color_distance(tuple(rgba[:3]), background_rgb)
-                if distance <= shadow_distance_threshold + 10.0 and current_alpha < 245:
+                channel_range = max(rgba[:3]) - min(rgba[:3])
+                background_luminance = sum(background_rgb) / 3.0
+                pixel_luminance = sum(rgba[:3]) / 3.0
+                looks_like_foot_halo = (
+                    distance <= shadow_distance_threshold + 10.0
+                    and channel_range <= 28
+                    and pixel_luminance >= background_luminance - 70.0
+                )
+                if looks_like_foot_halo or (
+                    distance <= shadow_distance_threshold + 10.0 and current_alpha < 245
+                ):
                     alpha_pixels[x, y] = 0
         result.putalpha(alpha)
     result_pixels = result.load()

@@ -420,6 +420,56 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         bottom_band = alpha.crop((0, cutout.height - 2, cutout.width, cutout.height))
         self.assertEqual(max(bottom_band.getdata()), 0)
 
+    def test_build_avatar_cutout_png_cleans_opaque_gray_foot_residue(self) -> None:
+        """Remove stronger gray residue attached to the sole line."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (120, 220), (240, 240, 240, 255))
+        pixels = image.load()
+        for y in range(20, 190):
+            for x in range(40, 80):
+                pixels[x, y] = (180, 120, 90, 255)
+        for y in range(190, 205):
+            for x in range(46, 74):
+                pixels[x, y] = (180, 120, 90, 255)
+        for x in range(46, 74):
+            pixels[x, 204] = (196, 196, 196, 255)
+
+        import io
+
+        source = io.BytesIO()
+        image.save(source, format="PNG")
+        cutout_bytes = worker._build_avatar_cutout_png(source.getvalue())
+        cutout = Image.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+        alpha = cutout.getchannel("A")
+        bottom_band = alpha.crop((0, cutout.height - 2, cutout.width, cutout.height))
+        self.assertEqual(max(bottom_band.getdata()), 0)
+
+    def test_build_avatar_cutout_png_keeps_dark_shoe_base(self) -> None:
+        """Preserve valid dark shoe pixels at the base of the silhouette."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (120, 220), (240, 240, 240, 255))
+        pixels = image.load()
+        for y in range(20, 190):
+            for x in range(40, 80):
+                pixels[x, y] = (180, 120, 90, 255)
+        for y in range(190, 205):
+            for x in range(46, 74):
+                pixels[x, y] = (32, 32, 32, 255)
+
+        import io
+
+        source = io.BytesIO()
+        image.save(source, format="PNG")
+        cutout_bytes = worker._build_avatar_cutout_png(source.getvalue())
+        cutout = Image.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+        alpha = cutout.getchannel("A")
+        lower_band = alpha.crop(
+            (0, max(0, cutout.height - 12), cutout.width, cutout.height)
+        )
+        self.assertGreater(max(lower_band.getdata()), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
