@@ -395,6 +395,31 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertLess(restored[1], 180)
         self.assertLess(restored[2], 180)
 
+    def test_build_avatar_cutout_png_cleans_soft_halo_at_foot_base(self) -> None:
+        """Remove a light semitransparent halo right around the feet base."""
+        from PIL import Image
+
+        image = Image.new("RGBA", (120, 220), (240, 240, 240, 255))
+        pixels = image.load()
+        for y in range(20, 190):
+            for x in range(40, 80):
+                pixels[x, y] = (180, 120, 90, 255)
+        for y in range(190, 205):
+            for x in range(46, 74):
+                pixels[x, y] = (180, 120, 90, 255)
+        for x in range(46, 74):
+            pixels[x, 204] = (220, 220, 220, 180)
+
+        import io
+
+        source = io.BytesIO()
+        image.save(source, format="PNG")
+        cutout_bytes = worker._build_avatar_cutout_png(source.getvalue())
+        cutout = Image.open(io.BytesIO(cutout_bytes)).convert("RGBA")
+        alpha = cutout.getchannel("A")
+        bottom_band = alpha.crop((0, cutout.height - 2, cutout.width, cutout.height))
+        self.assertEqual(max(bottom_band.getdata()), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

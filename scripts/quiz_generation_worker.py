@@ -1907,6 +1907,14 @@ def _build_avatar_cutout_png(image_bytes: bytes) -> bytes:
                     continue
                 if distance <= shadow_distance_threshold and current_alpha <= 245:
                     alpha_pixels[x, y] = 0
+            for y in range(max(0, bottom_y - 1), min(height, bottom_y + 2)):
+                current_alpha = alpha_pixels[x, y]
+                if current_alpha <= 0:
+                    continue
+                rgba = result_pixels[x, y]
+                distance = _color_distance(tuple(rgba[:3]), background_rgb)
+                if distance <= shadow_distance_threshold + 10.0 and current_alpha < 245:
+                    alpha_pixels[x, y] = 0
         result.putalpha(alpha)
     result_pixels = result.load()
     for y in range(height):
