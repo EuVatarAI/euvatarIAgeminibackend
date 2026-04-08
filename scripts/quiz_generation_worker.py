@@ -908,43 +908,9 @@ def _prepare_generation_prompt(
     Returns:
         str: Sanitized single-paragraph prompt optimized for image generation.
     """
-    sections: list[str] = [
-        "Create a purely visual image with zero readable text, letters, labels, captions, logos, signage, or watermarks anywhere."
-    ]
-    if enforce_photo_identity:
-        sections.append(
-            "Use the uploaded participant photo as the sole source of facial identity and recognizability. Do not invent a generic person, do not replace the face, and keep the participant clearly identifiable."
-        )
-        sections.append(
-            "Prioritize exact facial resemblance to the uploaded participant over toy stylization, beauty enhancement, or generic doll features."
-        )
-        sections.append(
-            "The final figure must look like the same real person from the uploaded photo, not an approximation."
-        )
-        sections.append(
-            "Keep the head, face, and expression photorealistic and human. Apply the collectible-toy treatment only as a subtle material finish, not as facial redesign."
-        )
-        sections.append(
-            "Do not create a caricature, doll face, cartoon face, oversized eyes, simplified nose, exaggerated jawline, exaggerated smile, or smoothed generic facial structure."
-        )
-        sections.append(
-            "Keep the head size, neck width, shoulders, arms, hands, torso, and legs in believable human proportion. Do not enlarge the head or shrink the body to create a toy-like caricature silhouette."
-        )
-        sections.append(
-            "Preserve the real facial proportions, eyelids, eye spacing, eyebrow shape, nose bridge, nostrils, lips, teeth visibility, cheek volume, jaw contour, and skin texture from the uploaded photo."
-        )
-        sections.append(
-            "If the participant is smiling in the photo, preserve the same smile shape and intensity. Do not broaden, simplify, or replace the smile with a generic doll expression."
-        )
-        sections.append(
-            "Do not invent personal attributes that are not visible in the uploaded photo. Do not add glasses, hats, jewelry, facial hair, tattoos, or clothing details unless they are clearly present in the participant photo."
-        )
-    if appearance_traits.strip():
-        sections.append(
-            "Requested appearance traits for the figure: "
-            + appearance_traits.strip().rstrip(".")
-            + "."
-        )
+    del enforce_photo_identity
+    del appearance_traits
+    sections: list[str] = []
 
     for raw_section in (base_prompt, appendix):
         text = str(raw_section or "").strip()
@@ -960,28 +926,8 @@ def _prepare_generation_prompt(
 
 
 def _build_avatar_cutout_prompt_appendix() -> str:
-    """Build strict instructions for the avatar-only cutout generation mode."""
-    instructions = [
-        "Generate only one full-body collectible figure avatar of the participant.",
-        "Use a plain solid neutral background with smooth even lighting and no visible scene elements.",
-        "The background must be a single clean studio backdrop designed for easy background removal, preferably a uniform light gray, light beige, or off-white color with no gradient, texture, or vignette.",
-        "Do not generate any packaging, box, frame, pedestal, floor props, scenery, furniture, text, logos, accessories, or decorative objects.",
-        "Keep the composition vertical 9:16 with the avatar standing upright and centered.",
-        "Show the full body from head to toe and keep the complete silhouette fully visible inside the frame.",
-        "Let the avatar occupy most of the image height while leaving a small clean margin around the silhouette.",
-        "Keep the head size in realistic proportion to the torso, shoulders, hips, arms, and legs. Do not generate an oversized head or miniaturized body.",
-        "Keep clear negative space around the head, arms, hands, torso, legs, feet, and between both legs so the full silhouette is easy to isolate.",
-        "Generate both full feet completely, including ankles, heels, soles, toes, or shoes when present. Do not crop, hide, merge, blur, or distort the feet.",
-        "Do not let the feet blend into the background or into any floor shadow. The bottom contour of each foot must be fully visible and clean.",
-        "Do not add floor shadow, cast shadow, glow, smoke, reflections, fog, background blur bands, or any dark contact shadow touching the feet or legs.",
-        "Do not generate any gray patch, gray band, background leak, washed-out area, or background-colored artifact on the hair, forehead, face, ears, or neck.",
-        "The head, hairline, forehead, and face must be clean, fully rendered, and completely free of background-colored contamination.",
-        "Do not generate gray seams, gray smudges, washed-out patches, cracks, straps, or background-colored artifacts on the shoulders, armpits, chest, torso, or biceps.",
-        "The shoulders, chest, torso, arms, and underarm transitions must be fully rendered and free of gray contamination or cutout residue.",
-        "Keep the outline of the hair, shoulders, elbows, hands, legs, ankles, and feet crisp and completely separated from the background.",
-        "Preserve realistic human proportions while keeping the collectible-figure material finish subtle and premium.",
-    ]
-    return "\n".join(instructions)
+    """Return no fixed appendix so avatar prompts come from the builder."""
+    return ""
 
 
 def _build_avatar_cutout_recovery_prompt(
@@ -2435,13 +2381,13 @@ def _process_job(settings: Settings, job: Job):
             prompt_applied = _prepare_generation_prompt(
                 rendered_prompt,
                 catalog_asset_appendix,
-                enforce_photo_identity=bool(photo_path),
-                appearance_traits=appearance_traits,
+                enforce_photo_identity=False,
+                appearance_traits="" if photo_path else appearance_traits,
             ) or build_editorial_prompt(gender, hair_color)
             recovery_prompt_applied = (
                 _build_avatar_cutout_recovery_prompt(
-                    enforce_photo_identity=bool(photo_path),
-                    appearance_traits=appearance_traits,
+                    enforce_photo_identity=False,
+                    appearance_traits="" if photo_path else appearance_traits,
                 )
                 if avatar_cutout_mode
                 else ""

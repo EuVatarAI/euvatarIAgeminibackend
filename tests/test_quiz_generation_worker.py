@@ -38,32 +38,26 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertEqual(raw_prompt, "prompt do construtor")
         self.assertEqual(prompt_source, "builder")
 
-    def test_photo_identity_clause_is_added_when_requested(self) -> None:
-        """Force the generated image to preserve the participant identity."""
+    def test_prepare_generation_prompt_keeps_builder_text_without_backend_identity_block(
+        self,
+    ) -> None:
+        """Do not inject the old backend identity block on top of the builder prompt."""
         prompt = worker._prepare_generation_prompt(
             "prompt base",
             "",
             enforce_photo_identity=True,
         )
-        self.assertIn("sole source of facial identity", prompt)
-        self.assertIn("Do not invent a generic person", prompt)
-        self.assertIn("Do not add glasses", prompt)
-        self.assertIn("photorealistic and human", prompt)
-        self.assertIn("Do not create a caricature", prompt)
-        self.assertIn("Preserve the real facial proportions", prompt)
-        self.assertIn("Keep the head size", prompt)
-        self.assertIn("same smile shape and intensity", prompt)
+        self.assertEqual(prompt, "prompt base")
 
-    def test_appearance_traits_are_injected_into_prompt(self) -> None:
-        """Include requested appearance traits without inferring from the photo."""
+    def test_prepare_generation_prompt_does_not_append_backend_traits(self) -> None:
+        """Do not append hidden appearance traits managed by the backend."""
         prompt = worker._prepare_generation_prompt(
             "prompt base",
             "",
             enforce_photo_identity=True,
             appearance_traits="woman, red hair",
         )
-        self.assertIn("Requested appearance traits for the figure", prompt)
-        self.assertIn("red hair", prompt)
+        self.assertEqual(prompt, "prompt base")
 
     def test_white_box_asset_forces_vertical_structural_rules(self) -> None:
         """Reinforce 9:16 white-box composition when the white box asset is present."""
@@ -235,17 +229,10 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
                     original
                 )
 
-    def test_avatar_cutout_prompt_appendix_forbids_scene_elements(self) -> None:
-        """Avatar cutout mode should request only the isolated figure on neutral background."""
+    def test_avatar_cutout_prompt_appendix_is_empty(self) -> None:
+        """Avatar cutout mode should no longer inject a fixed backend appendix."""
         appendix = worker._build_avatar_cutout_prompt_appendix()
-        self.assertIn("plain solid neutral background", appendix)
-        self.assertIn("Do not generate any packaging", appendix)
-        self.assertIn("full body from head to toe", appendix)
-        self.assertIn("vertical 9:16", appendix)
-        self.assertIn("Do not add floor shadow", appendix)
-        self.assertIn("Generate both full feet completely", appendix)
-        self.assertIn("gray patch", appendix)
-        self.assertIn("gray seams", appendix)
+        self.assertEqual(appendix, "")
 
     def test_avatar_cutout_recovery_prompt_is_short_and_canonical(self) -> None:
         """Fallback prompt should stay compact for no-image Gemini recoveries."""
@@ -258,7 +245,7 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
         self.assertIn("both full feet clearly visible", prompt)
         self.assertIn("no floor shadow", prompt)
         self.assertIn("no props, no accessories, no packaging, and no text", prompt)
-        self.assertIn("woman, blonde hair", prompt)
+        self.assertNotIn("woman, blonde hair", prompt)
 
     def test_finish_job_done_persists_cutout_path_when_supported(self) -> None:
         """Persist cutout metadata when the database accepts the new columns."""
