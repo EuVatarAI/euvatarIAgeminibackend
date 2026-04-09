@@ -2221,30 +2221,6 @@ def _process_job(settings: Settings, job: Job):
         cred_data = (
             cred.get("data_json") if isinstance(cred.get("data_json"), dict) else {}
         )
-        generation_catalog_labels = list(
-            dict.fromkeys(
-                [
-                    str(asset.get("label") or "").strip()
-                    for asset in generation_catalog_assets
-                    if str(asset.get("label") or "").strip()
-                ]
-            )
-        )
-        deferred_catalog_labels = list(
-            dict.fromkeys(
-                [
-                    label
-                    for label in selected_catalog_labels
-                    if label not in generation_catalog_labels
-                ]
-            )
-        )
-        prompt_template_payload = _build_prompt_template_payload(
-            {
-                **cred_data,
-                **generation_catalog_prompt_payload,
-            }
-        )
         winner_archetype_id = str(
             (cred_data or {}).get("winner_archetype_id") or ""
         ).strip()
@@ -2279,6 +2255,30 @@ def _process_job(settings: Settings, job: Job):
                 catalog_prompt_payload,
                 raw_prompt_template,
             )
+        generation_catalog_labels = list(
+            dict.fromkeys(
+                [
+                    str(asset.get("label") or "").strip()
+                    for asset in generation_catalog_assets
+                    if str(asset.get("label") or "").strip()
+                ]
+            )
+        )
+        deferred_catalog_labels = list(
+            dict.fromkeys(
+                [
+                    label
+                    for label in selected_catalog_labels
+                    if label not in generation_catalog_labels
+                ]
+            )
+        )
+        prompt_template_payload = _build_prompt_template_payload(
+            {
+                **cred_data,
+                **generation_catalog_prompt_payload,
+            }
+        )
         generation_prompt_template = _strip_template_lines_with_keys(
             raw_prompt_template,
             deferred_catalog_variable_keys,
