@@ -130,6 +130,33 @@ class QuizGenerationWorkerRetryTests(unittest.TestCase):
             ["o_que_voce_mais_ama_em_porto_alegre"],
         )
 
+    def test_referenced_selected_asset_is_promoted_to_generation_assets(self) -> None:
+        """Selected asset placeholders like {{neymar}} must survive into Gemini references."""
+        catalog_assets, prompt_payload = worker._resolve_catalog_prompt_assets(
+            {
+                "jogador": "neymar",
+            },
+            [
+                {
+                    "asset_key": "neymar",
+                    "label": "Neymar",
+                    "required": False,
+                    "storage_path": "neymar.png",
+                    "variable_key": "jogador",
+                }
+            ],
+        )
+        assets, payload, deferred_keys = worker._filter_generation_catalog_assets(
+            catalog_assets,
+            prompt_payload,
+            "Photo with {{neymar}} and the user.",
+        )
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(str(assets[0].get("asset_key")), "neymar")
+        self.assertEqual(payload.get("neymar"), "Neymar")
+        self.assertIn("jogador", deferred_keys)
+        self.assertNotIn("neymar", deferred_keys)
+
     def test_template_lines_with_deferred_asset_keys_are_removed(self) -> None:
         """Drop asset-specific template lines that should no longer reach Gemini."""
         template = (

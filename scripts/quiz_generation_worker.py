@@ -1120,6 +1120,8 @@ def _resolve_catalog_prompt_assets(
         if not matched_assets:
             continue
         selected_assets.extend(matched_assets)
+        for asset in matched_assets:
+            prompt_payload[asset["asset_key"]] = asset["label"]
         labels = [asset["label"] for asset in matched_assets]
         prompt_payload[variable_key] = labels if len(labels) > 1 else labels[0]
 
@@ -1255,6 +1257,7 @@ def _build_catalog_asset_prompt_appendix(
 def _filter_generation_catalog_assets(
     assets: list[dict[str, str]] | None,
     prompt_payload: dict[str, object] | None,
+    template: str = "",
 ) -> tuple[list[dict[str, str]], dict[str, object], list[str]]:
     """Keep only structural catalog assets for Gemini generation.
 
@@ -1262,9 +1265,18 @@ def _filter_generation_catalog_assets(
     """
     resolved_assets = assets if isinstance(assets, list) else []
     resolved_payload = prompt_payload if isinstance(prompt_payload, dict) else {}
+    normalized_template = _normalize_template_placeholders(str(template or ""))
+    referenced_asset_keys = {
+        _normalize_variable_key(str(match.group(1) or ""))
+        for match in _VAR_TOKEN_RE.finditer(normalized_template)
+    }
 
     generation_assets = [
-        asset for asset in resolved_assets if _asset_matches_white_box_reference(asset)
+        asset
+        for asset in resolved_assets
+        if _asset_matches_white_box_reference(asset)
+        or _normalize_variable_key(str(asset.get("asset_key") or ""))
+        in referenced_asset_keys
     ]
     generation_asset_keys = {
         _normalize_variable_key(str(asset.get("asset_key") or ""))
@@ -2159,27 +2171,6 @@ def _process_job(settings: Settings, job: Job):
             cred_data_for_log,
             catalog_prompt_assets,
         )
-        if avatar_cutout_mode:
-            generation_catalog_assets = []
-            generation_catalog_prompt_payload = {}
-            deferred_catalog_variable_keys = list(
-                dict.fromkeys(
-                    [
-                        _normalize_variable_key(str(key or ""))
-                        for key in catalog_prompt_payload.keys()
-                        if _normalize_variable_key(str(key or ""))
-                    ]
-                )
-            )
-        else:
-            (
-                generation_catalog_assets,
-                generation_catalog_prompt_payload,
-                deferred_catalog_variable_keys,
-            ) = _filter_generation_catalog_assets(
-                catalog_assets,
-                catalog_prompt_payload,
-            )
         selected_catalog_labels: list[str] = []
         for value in catalog_prompt_payload.values():
             if isinstance(value, list):
@@ -2268,6 +2259,26 @@ def _process_job(settings: Settings, job: Job):
             cred_data,
             archetype,
         )
+        if avatar_cutout_mode:
+            (
+                generation_catalog_assets,
+                generation_catalog_prompt_payload,
+                deferred_catalog_variable_keys,
+            ) = _filter_generation_catalog_assets(
+                catalog_assets,
+                catalog_prompt_payload,
+                raw_prompt_template,
+            )
+        else:
+            (
+                generation_catalog_assets,
+                generation_catalog_prompt_payload,
+                deferred_catalog_variable_keys,
+            ) = _filter_generation_catalog_assets(
+                catalog_assets,
+                catalog_prompt_payload,
+                raw_prompt_template,
+            )
         generation_prompt_template = _strip_template_lines_with_keys(
             raw_prompt_template,
             deferred_catalog_variable_keys,
